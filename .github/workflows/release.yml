@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: cref-darwin-arm64
+          - os: macos-13
+            artifact: cref-darwin-x86_64
+          - os: ubuntu-latest
+            artifact: cref-linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libncurses-dev
+
+      - name: Build
+        run: make release
+
+      - name: Rename binary
+        run: mv cref ${{ matrix.artifact }}
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+          generate_release_notes: true
