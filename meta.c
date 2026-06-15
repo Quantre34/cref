@@ -177,78 +177,6 @@ static int match_ext(const char *name, const char * const *exts, int ext_count) 
     return 0;
 }
 
-static void scan_recursive(const char *root, const char *rel,
-                            FileMeta **files_p, int *count, int *cap,
-                            const char * const *exts, int ext_count) {
-    if (*count >= META_SCAN_SOFTCAP) return;
-
-    char full[META_PATH_LEN];
-    if (rel[0])
-        snprintf(full, sizeof(full), "%s/%s", root, rel);
-    else
-        strncpy(full, root, sizeof(full) - 1);
-
-    if (should_skip_abs(full)) return;
-
-    DIR *d = opendir(full);
-    if (!d) return;
-
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL && *count < META_SCAN_SOFTCAP) {
-        const char *name = entry->d_name;
-        if (name[0] == '.') continue;
-
-        char child[META_PATH_LEN];
-        snprintf(child, sizeof(child), "%s/%s", full, name);
-
-        struct stat st;
-        if (lstat(child, &st) != 0) continue;   /* lstat: never follow symlinks */
-
-        if (S_ISLNK(st.st_mode)) continue;       /* skip all symlinks */
-
-        if (S_ISDIR(st.st_mode)) {
-            if (should_skip_dir(name)) continue;
-            if (should_skip_abs(child)) continue;
-            char child_rel[META_SUBDIR_LEN];
-            if (rel[0])
-                snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, name);
-            else
-                strncpy(child_rel, name, sizeof(child_rel) - 1);
-            scan_recursive(root, child_rel, files_p, count, cap, exts, ext_count);
-
-        } else if (S_ISREG(st.st_mode)) {
-            if (!match_ext(name, exts, ext_count)) continue;
-            if (should_skip(name)) continue;
-
-            /* Grow dynamic array if needed */
-            if (*count >= *cap) {
-                int new_cap = (*cap) * 2;
-                FileMeta *tmp = realloc(*files_p, new_cap * sizeof(FileMeta));
-                if (!tmp) break;
-                *files_p = tmp;
-                *cap     = new_cap;
-            }
-
-            FileMeta *m = &(*files_p)[*count];
-            memset(m, 0, sizeof(*m));
-            strncpy(m->path,     child, META_PATH_LEN - 1);
-            strncpy(m->filename, name,  META_NAME_LEN - 1);
-            strncpy(m->title,    name,  META_TITLE_LEN - 1);
-            strncpy(m->subdir,   rel,   META_SUBDIR_LEN - 1);
-            m->unreadable = (access(child, R_OK) != 0);
-            if (!m->unreadable) {
-                m->binary = is_binary_file(child);
-                if (!m->binary) {
-                    m->line_count = count_lines(child);
-                    read_frontmatter(child, m);
-                }
-            }
-            (*count)++;
-        }
-    }
-    closedir(d);
-}
-
 static int cmp_subdir_filename(const void *a, const void *b) {
     const FileMeta *fa = (const FileMeta *)a;
     const FileMeta *fb = (const FileMeta *)b;
@@ -257,19 +185,105 @@ static int cmp_subdir_filename(const void *a, const void *b) {
 }
 
 FileMeta *scan_dir(const char *dir, int *count_out,
-                   const char * const *exts, int ext_count) {
+                   const char * const *exts, int ext_count,
+                   ScanProgressFn progress_fn, void *progress_ctx) {
     DIR *test = opendir(dir);
     if (!test) { *count_out = 0; return NULL; }
     closedir(test);
 
     if (!exts) ext_count = 0;
 
-    int cap = 256;
-    FileMeta *files = calloc(cap, sizeof(FileMeta));
-    if (!files) { *count_out = 0; return NULL; }
+    /* BFS queue of relative subdirectory paths */
+    int bfs_cap = 4096, qhead = 0, qtail = 0;
+    char (*bfs_q)[META_SUBDIR_LEN] = malloc(bfs_cap * sizeof(*bfs_q));
+    if (!bfs_q) { *count_out = 0; return NULL; }
+    bfs_q[qtail][0] = '\0';   /* root: relative path = "" */
+    qtail++;
 
-    int count = 0;
-    scan_recursive(dir, "", &files, &count, &cap, exts, ext_count);
+    int cap = 256, count = 0, last_flush = 0;
+    FileMeta *files = calloc(cap, sizeof(FileMeta));
+    if (!files) { free(bfs_q); *count_out = 0; return NULL; }
+
+    while (qhead < qtail) {
+        const char *rel = bfs_q[qhead++];
+
+        char full[META_PATH_LEN];
+        if (rel[0])
+            snprintf(full, sizeof(full), "%s/%s", dir, rel);
+        else
+            strncpy(full, dir, sizeof(full) - 1);
+
+        if (should_skip_abs(full)) continue;
+
+        DIR *d = opendir(full);
+        if (!d) continue;
+
+        struct dirent *entry;
+        while ((entry = readdir(d)) != NULL) {
+            const char *name = entry->d_name;
+            if (name[0] == '.') continue;
+
+            char child[META_PATH_LEN];
+            snprintf(child, sizeof(child), "%s/%s", full, name);
+
+            struct stat st;
+            if (lstat(child, &st) != 0) continue;
+            if (S_ISLNK(st.st_mode))    continue;
+
+            if (S_ISDIR(st.st_mode)) {
+                if (should_skip_dir(name))  continue;
+                if (should_skip_abs(child)) continue;
+                /* Grow BFS queue if needed */
+                if (qtail >= bfs_cap) {
+                    int nc = bfs_cap * 2;
+                    char (*tmp)[META_SUBDIR_LEN] = realloc(bfs_q, nc * sizeof(*bfs_q));
+                    if (!tmp) continue;
+                    bfs_q = tmp; bfs_cap = nc;
+                }
+                if (rel[0])
+                    snprintf(bfs_q[qtail], META_SUBDIR_LEN, "%s/%s", rel, name);
+                else
+                    strncpy(bfs_q[qtail], name, META_SUBDIR_LEN - 1);
+                qtail++;
+
+            } else if (S_ISREG(st.st_mode)) {
+                if (!match_ext(name, exts, ext_count)) continue;
+                if (should_skip(name))                 continue;
+
+                if (count >= cap) {
+                    int nc = cap * 2;
+                    FileMeta *tmp = realloc(files, nc * sizeof(FileMeta));
+                    if (!tmp) goto done;
+                    files = tmp; cap = nc;
+                }
+
+                FileMeta *m = &files[count];
+                memset(m, 0, sizeof(*m));
+                strncpy(m->path,     child, META_PATH_LEN - 1);
+                strncpy(m->filename, name,  META_NAME_LEN - 1);
+                strncpy(m->title,    name,  META_TITLE_LEN - 1);
+                strncpy(m->subdir,   rel,   META_SUBDIR_LEN - 1);
+                m->unreadable = (access(child, R_OK) != 0);
+                if (!m->unreadable) {
+                    m->binary = is_binary_file(child);
+                    if (!m->binary) {
+                        m->line_count = count_lines(child);
+                        read_frontmatter(child, m);
+                    }
+                }
+                count++;
+
+                if (progress_fn && (count - last_flush) >= SCAN_BATCH_SIZE) {
+                    progress_fn(files, count, progress_ctx);
+                    last_flush = count;
+                }
+            }
+        }
+        closedir(d);
+    }
+
+done:
+    free(bfs_q);
     qsort(files, count, sizeof(FileMeta), cmp_subdir_filename);
     *count_out = count;
     return files;

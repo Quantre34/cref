@@ -194,7 +194,8 @@ typedef struct {
     pthread_t        scan_thread;
     pthread_mutex_t  scan_mutex;
     volatile int     scan_running;       /* 1 = thread is active */
-    volatile int     scan_done;          /* 1 = thread finished, pick up results */
+    volatile int     scan_done;          /* 1 = final result ready, join thread */
+    volatile int     scan_batch_ready;   /* 1 = partial batch in scan_pending */
     FileMeta        *scan_pending;       /* result written by thread */
     int              scan_pending_count; /* result count written by thread */
 

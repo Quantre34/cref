@@ -814,12 +814,6 @@ static void draw_list_tree(const App *app) {
         if (pair) attroff(COLOR_PAIR(pair) | A_BOLD);
     }
 
-    /* Truncation notice */
-    if (app->file_count >= META_SCAN_SOFTCAP) {
-        attron(COLOR_PAIR(CP_SUGGEST) | A_BOLD);
-        mvprintw(PANEL_Y + view_h, 1, "…%d+ files (soft cap)", META_SCAN_SOFTCAP);
-        attroff(COLOR_PAIR(CP_SUGGEST) | A_BOLD);
-    }
 }
 
 /* ---------------------------------------------------------------
@@ -2945,18 +2939,36 @@ static int save_file(App *app) {
    Background scan thread
 --------------------------------------------------------------- */
 
+/* Called by scan_dir every SCAN_BATCH_SIZE files; runs in scan thread */
+static void scan_progress_cb(const FileMeta *files, int count, void *ctx) {
+    App *app = ctx;
+    FileMeta *snap = malloc(count * sizeof(FileMeta));
+    if (!snap) return;
+    memcpy(snap, files, count * sizeof(FileMeta));
+
+    pthread_mutex_lock(&app->scan_mutex);
+    free(app->scan_pending);
+    app->scan_pending       = snap;
+    app->scan_pending_count = count;
+    app->scan_batch_ready   = 1;
+    pthread_mutex_unlock(&app->scan_mutex);
+}
+
 static void *scan_thread_fn(void *arg) {
     ScanArgs *sa = arg;
     App *app = sa->app;
 
     int count = 0;
     FileMeta *result = scan_dir(sa->dir, &count,
-                                (const char * const *)sa->exts, sa->ext_count);
+                                (const char * const *)sa->exts, sa->ext_count,
+                                scan_progress_cb, app);
 
+    /* Store sorted final result; clear any unread partial batch */
     pthread_mutex_lock(&app->scan_mutex);
     free(app->scan_pending);
     app->scan_pending       = result;
     app->scan_pending_count = count;
+    app->scan_batch_ready   = 0;
     app->scan_done          = 1;
     pthread_mutex_unlock(&app->scan_mutex);
 
@@ -2973,6 +2985,7 @@ static void apply_scan_result(App *app) {
     app->scan_pending       = NULL;
     app->scan_pending_count = 0;
     app->scan_done          = 0;
+    app->scan_batch_ready   = 0;
     pthread_mutex_unlock(&app->scan_mutex);
 
     free(app->filtered);
@@ -2981,15 +2994,45 @@ static void apply_scan_result(App *app) {
     app->filtered_count = 0;
 }
 
-/* Check if background scan finished; if so, swap results in */
+/* Check for partial batches or final completion; apply whichever is ready */
 static void check_scan_done(App *app) {
-    if (!app->scan_running || !app->scan_done) return;
+    if (!app->scan_running) return;
 
-    pthread_join(app->scan_thread, NULL);
-    app->scan_running = 0;
-    apply_scan_result(app);
-    update_search(app);
-    build_tree(app);
+    pthread_mutex_lock(&app->scan_mutex);
+    int   batch_ready = app->scan_batch_ready;
+    int   is_done     = app->scan_done;
+    FileMeta *snap    = NULL;
+    int   snap_count  = 0;
+
+    if (batch_ready) {
+        snap                    = app->scan_pending;
+        snap_count              = app->scan_pending_count;
+        app->scan_pending       = NULL;
+        app->scan_pending_count = 0;
+        app->scan_batch_ready   = 0;
+    }
+    pthread_mutex_unlock(&app->scan_mutex);
+
+    /* Apply partial batch (progressive display) */
+    if (snap) {
+        free(app->files);
+        app->files          = snap;
+        app->file_count     = snap_count;
+        free(app->filtered);
+        app->filtered       = snap_count > 0 ? malloc(snap_count * sizeof(int)) : NULL;
+        app->filtered_count = 0;
+        update_search(app);
+        build_tree(app);
+    }
+
+    /* Apply final sorted result and join thread */
+    if (is_done) {
+        pthread_join(app->scan_thread, NULL);
+        app->scan_running = 0;
+        apply_scan_result(app);
+        update_search(app);
+        build_tree(app);
+    }
 }
 
 /* Launch a background scan for the current directory + filter */
@@ -3004,6 +3047,7 @@ static void start_scan(App *app) {
         app->scan_pending       = NULL;
         app->scan_pending_count = 0;
         app->scan_done          = 0;
+        app->scan_batch_ready   = 0;
         pthread_mutex_unlock(&app->scan_mutex);
     }
 

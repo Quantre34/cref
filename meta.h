@@ -1,7 +1,7 @@
 #ifndef META_H
 #define META_H
 
-#define META_SCAN_SOFTCAP  200000  /* warn + truncate after this many files */
+#define SCAN_BATCH_SIZE    400   /* progress callback interval during scan */
 #define META_MAX_TAGS      24
 #define META_PATH_LEN      512
 #define META_NAME_LEN      128
@@ -26,12 +26,16 @@ typedef struct {
     int  unreadable;    /* 1 if access(path, R_OK) fails */
 } FileMeta;
 
-/* Dynamically scans dir for files matching any extension in exts[].
-   exts is an array of ext_count strings without dots (e.g. "md", "txt").
-   ext_count == 0 accepts all file types.
+/* Called periodically during scan with files found so far.
+   Do NOT free or realloc the array; the scanner owns it. */
+typedef void (*ScanProgressFn)(const FileMeta *files, int count, void *ctx);
+
+/* Dynamically scans dir (BFS order) for files matching any extension in exts[].
+   ext_count == 0 accepts all file types.  progress_fn may be NULL.
    Returns heap-allocated FileMeta array (caller must free), sets *count_out.
    Returns NULL if dir cannot be opened. */
 FileMeta *scan_dir(const char *dir, int *count_out,
-                   const char * const *exts, int ext_count);
+                   const char * const *exts, int ext_count,
+                   ScanProgressFn progress_fn, void *progress_ctx);
 
 #endif
