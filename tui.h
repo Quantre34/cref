@@ -203,6 +203,24 @@ typedef struct {
     int              scan_frame;         /* spinner tick counter */
     FileMeta        *scan_pending;       /* result written by thread */
     int              scan_pending_count; /* result count written by thread */
+    char           (*scan_pending_disc)[META_SUBDIR_LEN]; /* boundary dirs from thread */
+    int              scan_pending_disc_count;
+
+    /* Boundary dirs: discovered but not yet recursed into */
+    char           (*boundary_dirs)[META_SUBDIR_LEN];
+    int              boundary_dir_count;
+
+    /* Subdirs that have been fully loaded into files[] */
+    char           (*loaded_dirs)[META_SUBDIR_LEN];
+    int              loaded_dir_count;
+    int              loaded_dir_cap;
+
+    /* Pending on-demand expansion queue (processed one at a time) */
+    char             expand_queue[8][META_SUBDIR_LEN];
+    int              expand_queue_count;
+
+    /* Currently loading subdir (empty string if none) */
+    char             loading_subdir[META_SUBDIR_LEN];
 
     Mode mode;
     int  quit;

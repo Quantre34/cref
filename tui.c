@@ -17,10 +17,12 @@
 typedef struct {
     App        *app;
     char        dir[META_PATH_LEN];
+    char        subdir_prefix[META_SUBDIR_LEN]; /* prefix to prepend to returned subdirs */
     char        exts_buf[256];
     const char *exts[16];
     int         ext_count;
     int         max_depth;  /* -1 = unlimited */
+    int         merge_mode; /* 0=replace files[], 1=merge into files[] */
 } ScanArgs;
 
 /* Color pairs */
@@ -503,18 +505,46 @@ static void rebuild_view(App *app) {
 }
 
 static void build_tree(App *app) {
+    /* Snapshot expanded dirs and currently-selected subdir before wiping tree */
+    char (*expanded_snap)[META_SUBDIR_LEN] = NULL;
+    int   expanded_snap_count = 0;
+    char  sel_subdir[META_SUBDIR_LEN]  = "";
+    char  sel_name[64]                 = "";
+
+    if (app->tree_all_count > 0) {
+        expanded_snap = malloc(app->tree_all_count * sizeof(*expanded_snap));
+        if (expanded_snap) {
+            for (int i = 0; i < app->tree_all_count; i++) {
+                if (app->tree_all[i].kind == NODE_DIR &&
+                    app->tree_all[i].expanded) {
+                    strncpy(expanded_snap[expanded_snap_count++],
+                            app->tree_all[i].subdir, META_SUBDIR_LEN - 1);
+                }
+            }
+        }
+        /* Record currently selected item for re-selection after rebuild */
+        if (app->tree_sel < app->tree_view_count) {
+            int vi = app->tree_view[app->tree_sel];
+            strncpy(sel_subdir, app->tree_all[vi].subdir, META_SUBDIR_LEN - 1);
+            strncpy(sel_name,   app->tree_all[vi].name,   sizeof(sel_name) - 1);
+        }
+    }
+
     app->tree_all_count  = 0;
     app->tree_view_count = 0;
     app->tree_sel        = 0;
     app->tree_offset     = 0;
 
-    if (app->file_count == 0) return;
+    if (app->file_count == 0 && app->boundary_dir_count == 0) {
+        free(expanded_snap);
+        return;
+    }
 
     /* Step 1: Collect unique subdirs from sorted files — O(N)
        Since files[] is sorted by subdir, duplicates are consecutive. */
     int usub_cap = app->file_count + 1;
     char (*usubs)[META_SUBDIR_LEN] = malloc(usub_cap * sizeof(*usubs));
-    if (!usubs) return;
+    if (!usubs) { free(expanded_snap); return; }
     int usub_count = 0;
     const char *prev_sub = "";
     for (int fi = 0; fi < app->file_count; fi++) {
@@ -525,11 +555,16 @@ static void build_tree(App *app) {
         strncpy(usubs[usub_count++], sub, META_SUBDIR_LEN - 1);
     }
 
-    /* Step 2: Generate ALL prefix strings — O(D × depth) */
-    int prefix_cap = usub_count * 12 + 16;
+    /* Step 2: Generate ALL prefix strings — O(D × depth).
+       Also include all boundary dirs (and their prefixes) so they
+       appear in the tree even though they have no files yet. */
+    int prefix_cap = (usub_count + app->boundary_dir_count) * 12 + 16;
     char (*prefixes)[META_SUBDIR_LEN] = malloc(prefix_cap * sizeof(*prefixes));
-    if (!prefixes) { free(usubs); return; }
+    if (!prefixes) { free(usubs); free(expanded_snap); return; }
     int prefix_count = 0;
+
+    /* Helper lambda-like: add all prefixes of a path string */
+    /* — inlined for both usubs and boundary_dirs */
     for (int ui = 0; ui < usub_count; ui++) {
         char buf[META_SUBDIR_LEN];
         strncpy(buf, usubs[ui], sizeof(buf) - 1);
@@ -546,12 +581,27 @@ static void build_tree(App *app) {
     }
     free(usubs);
 
+    for (int bi = 0; bi < app->boundary_dir_count; bi++) {
+        char buf[META_SUBDIR_LEN];
+        strncpy(buf, app->boundary_dirs[bi], sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        char *p = buf;
+        while (1) {
+            char *sl = strchr(p, '/');
+            if (sl) *sl = '\0';
+            if (prefix_count < prefix_cap)
+                strncpy(prefixes[prefix_count++], buf, META_SUBDIR_LEN - 1);
+            if (!sl) break;
+            *sl = '/'; p = sl + 1;
+        }
+    }
+
     /* Step 3: Sort prefixes — O(P log P) */
     qsort(prefixes, prefix_count, sizeof(*prefixes), qsort_strcmp);
 
     /* Step 4: Unique → dirs[] — O(P) */
     char (*dirs)[META_SUBDIR_LEN] = malloc((prefix_count + 1) * sizeof(*dirs));
-    if (!dirs) { free(prefixes); return; }
+    if (!dirs) { free(prefixes); free(expanded_snap); return; }
     int dir_count = 0;
     for (int i = 0; i < prefix_count; i++) {
         if (dir_count == 0 || strcmp(prefixes[i], dirs[dir_count - 1]) != 0) {
@@ -562,8 +612,46 @@ static void build_tree(App *app) {
 
     /* dirs[] is sorted; build_subtree uses binary search to find descendants */
     build_subtree(app, "", 0, 0, dirs, dir_count);
-    rebuild_view(app);
     free(dirs);
+
+    /* Step 5: Restore expanded state */
+    if (expanded_snap) {
+        for (int i = 0; i < app->tree_all_count; i++) {
+            if (app->tree_all[i].kind != NODE_DIR) continue;
+            for (int j = 0; j < expanded_snap_count; j++) {
+                if (strcmp(app->tree_all[i].subdir, expanded_snap[j]) == 0) {
+                    app->tree_all[i].expanded = 1;
+                    break;
+                }
+            }
+        }
+        free(expanded_snap);
+    }
+
+    rebuild_view(app);
+
+    /* Step 6: Restore selection (best-effort match by subdir+name) */
+    if (sel_subdir[0] || sel_name[0]) {
+        int best = -1;
+        for (int i = 0; i < app->tree_view_count; i++) {
+            int vi = app->tree_view[i];
+            if (strcmp(app->tree_all[vi].subdir, sel_subdir) == 0 &&
+                strcmp(app->tree_all[vi].name,   sel_name)   == 0) {
+                best = i;
+                break;
+            }
+        }
+        if (best >= 0) {
+            app->tree_sel = best;
+            /* Keep offset sane */
+            int view_h = PANEL_H - META_PANEL_H - 1;
+            if (app->tree_sel < app->tree_offset)
+                app->tree_offset = app->tree_sel;
+            if (app->tree_sel >= app->tree_offset + view_h)
+                app->tree_offset = app->tree_sel - view_h + 1;
+            if (app->tree_offset < 0) app->tree_offset = 0;
+        }
+    }
 }
 
 /* ---------------------------------------------------------------
@@ -873,10 +961,17 @@ static void draw_list_tree(const App *app) {
             name[sizeof(name) - 1] = '\0';
             if ((int)strlen(name) > name_w) name[name_w] = '\0';
 
+            /* Show spinner glyph when this dir is currently being loaded */
+            char bracket_char = n->expanded ? '-' : '+';
+            if (app->loading_subdir[0] &&
+                strcmp(n->subdir, app->loading_subdir) == 0) {
+                static const char sp[] = "|/-\\";
+                bracket_char = sp[(app->scan_frame / 3) % 4];
+            }
             mvprintw(row, 0, "%s %*s[%c]%-*s %s",
                 arrow,
                 n->depth * 2, "",
-                n->expanded ? '-' : '+',
+                bracket_char,
                 name_w, name,
                 info);
         } else {
@@ -3072,17 +3167,53 @@ static void *scan_thread_fn(void *arg) {
     App *app = sa->app;
 
     int count = 0;
+    char (*disc_arr)[META_SUBDIR_LEN] = NULL;
+    int disc_count = 0;
+
+    /* For merge mode, don't use progress callback (subdirs are small).
+       For replace mode, use the progress callback for progressive display. */
+    ScanProgressFn pfn = (sa->merge_mode == 0) ? scan_progress_cb : NULL;
+
     FileMeta *result = scan_dir(sa->dir, &count,
                                 (const char * const *)sa->exts, sa->ext_count,
                                 sa->max_depth,
-                                scan_progress_cb, app,
+                                &disc_arr, &disc_count,
+                                pfn, app,
                                 &app->scan_cancel);
+
+    if (sa->merge_mode == 1) {
+        /* Fix up subdir paths: prepend subdir_prefix */
+        for (int i = 0; i < count; i++) {
+            char new_sub[META_SUBDIR_LEN];
+            if (result[i].subdir[0])
+                snprintf(new_sub, META_SUBDIR_LEN, "%s/%s",
+                         sa->subdir_prefix, result[i].subdir);
+            else
+                strncpy(new_sub, sa->subdir_prefix, META_SUBDIR_LEN - 1);
+            new_sub[META_SUBDIR_LEN - 1] = '\0';
+            strncpy(result[i].subdir, new_sub, META_SUBDIR_LEN - 1);
+        }
+        /* Fix up discovered boundary dirs similarly */
+        for (int i = 0; i < disc_count; i++) {
+            char new_sub[META_SUBDIR_LEN];
+            if (disc_arr[i][0])
+                snprintf(new_sub, META_SUBDIR_LEN, "%s/%s",
+                         sa->subdir_prefix, disc_arr[i]);
+            else
+                strncpy(new_sub, sa->subdir_prefix, META_SUBDIR_LEN - 1);
+            new_sub[META_SUBDIR_LEN - 1] = '\0';
+            strncpy(disc_arr[i], new_sub, META_SUBDIR_LEN - 1);
+        }
+    }
 
     /* Store sorted final result; clear any unread partial batch */
     pthread_mutex_lock(&app->scan_mutex);
     free(app->scan_pending);
     app->scan_pending       = result;
     app->scan_pending_count = count;
+    free(app->scan_pending_disc);
+    app->scan_pending_disc       = disc_arr;
+    app->scan_pending_disc_count = disc_count;
     app->scan_batch_ready   = 0;
     app->scan_done          = 1;
     pthread_mutex_unlock(&app->scan_mutex);
@@ -3091,17 +3222,163 @@ static void *scan_thread_fn(void *arg) {
     return NULL;
 }
 
+/* ---- merge sort comparator (mirrors meta.c cmp_subdir_filename) ---- */
+static int cmp_filemeta_subdir_name(const void *a, const void *b) {
+    const FileMeta *fa = (const FileMeta *)a;
+    const FileMeta *fb = (const FileMeta *)b;
+    int c = strcmp(fa->subdir, fb->subdir);
+    return c ? c : strcmp(fa->filename, fb->filename);
+}
+
+/* ---- lazy-load helpers ---- */
+
+static int subdir_is_loaded(App *app, const char *subdir) {
+    for (int i = 0; i < app->loaded_dir_count; i++)
+        if (strcmp(app->loaded_dirs[i], subdir) == 0) return 1;
+    return 0;
+}
+
+static int is_boundary_dir(App *app, const char *subdir) {
+    for (int i = 0; i < app->boundary_dir_count; i++)
+        if (strcmp(app->boundary_dirs[i], subdir) == 0) return 1;
+    return 0;
+}
+
+/* Add subdir to loaded_dirs (sorted, no duplicates) */
+static void loaded_dirs_add(App *app, const char *subdir) {
+    if (subdir_is_loaded(app, subdir)) return;
+    if (app->loaded_dir_count >= app->loaded_dir_cap) {
+        int nc = app->loaded_dir_cap ? app->loaded_dir_cap * 2 : 16;
+        char (*tmp)[META_SUBDIR_LEN] = realloc(app->loaded_dirs, nc * sizeof(*tmp));
+        if (!tmp) return;
+        app->loaded_dirs    = tmp;
+        app->loaded_dir_cap = nc;
+    }
+    strncpy(app->loaded_dirs[app->loaded_dir_count++], subdir, META_SUBDIR_LEN - 1);
+}
+
+static void boundary_dirs_free(App *app) {
+    free(app->boundary_dirs);
+    app->boundary_dirs      = NULL;
+    app->boundary_dir_count = 0;
+}
+
+static void loaded_dirs_free(App *app) {
+    free(app->loaded_dirs);
+    app->loaded_dirs      = NULL;
+    app->loaded_dir_count = 0;
+    app->loaded_dir_cap   = 0;
+}
+
+/* Forward declaration */
+static void start_subdir_scan(App *app, const char *subdir);
+
 /* Apply completed scan results (call after joining the thread) */
 static void apply_scan_result(App *app) {
     pthread_mutex_lock(&app->scan_mutex);
-    free(app->files);
-    app->files      = app->scan_pending;
-    app->file_count = app->scan_pending_count;
-    app->scan_pending       = NULL;
-    app->scan_pending_count = 0;
-    app->scan_done          = 0;
-    app->scan_batch_ready   = 0;
+    FileMeta *new_files       = app->scan_pending;
+    int       new_count       = app->scan_pending_count;
+    char    (*disc_arr)[META_SUBDIR_LEN] = app->scan_pending_disc;
+    int       disc_count      = app->scan_pending_disc_count;
+    int       merge_mode      = 0; /* determined by loading_subdir */
+    app->scan_pending              = NULL;
+    app->scan_pending_count        = 0;
+    app->scan_pending_disc         = NULL;
+    app->scan_pending_disc_count   = 0;
+    app->scan_done                 = 0;
+    app->scan_batch_ready          = 0;
     pthread_mutex_unlock(&app->scan_mutex);
+
+    /* If loading_subdir is set, this was a merge-mode scan */
+    merge_mode = (app->loading_subdir[0] != '\0');
+
+    if (!merge_mode) {
+        /* Replace mode: swap in new file list */
+        free(app->files);
+        app->files      = new_files;
+        app->file_count = new_count;
+
+        /* Update boundary dirs */
+        boundary_dirs_free(app);
+        app->boundary_dirs      = disc_arr;
+        app->boundary_dir_count = disc_count;
+
+        /* Reset loaded_dirs: root ("") was loaded */
+        loaded_dirs_free(app);
+        loaded_dirs_add(app, "");
+
+        app->loading_subdir[0] = '\0';
+    } else {
+        /* Merge mode: insert new_files into existing app->files[] */
+        char loaded_sub[META_SUBDIR_LEN];
+        strncpy(loaded_sub, app->loading_subdir, META_SUBDIR_LEN - 1);
+        loaded_sub[META_SUBDIR_LEN - 1] = '\0';
+        app->loading_subdir[0] = '\0';
+
+        if (new_files && new_count > 0) {
+            int total = app->file_count + new_count;
+            FileMeta *merged = realloc(app->files, total * sizeof(FileMeta));
+            if (merged) {
+                /* Deduplicate: skip incoming entries whose path already exists */
+                int added = 0;
+                for (int i = 0; i < new_count; i++) {
+                    int dup = 0;
+                    for (int j = 0; j < app->file_count; j++) {
+                        if (strcmp(new_files[i].path, merged[j].path) == 0) {
+                            dup = 1; break;
+                        }
+                    }
+                    if (!dup) {
+                        merged[app->file_count + added] = new_files[i];
+                        added++;
+                    }
+                }
+                app->files      = merged;
+                app->file_count = app->file_count + added;
+                qsort(app->files, app->file_count, sizeof(FileMeta),
+                      cmp_filemeta_subdir_name);
+            }
+        }
+        free(new_files);
+
+        /* Update boundary_dirs: remove loaded_sub, add new disc dirs */
+        /* Remove loaded_sub from boundary_dirs */
+        for (int i = 0; i < app->boundary_dir_count; i++) {
+            if (strcmp(app->boundary_dirs[i], loaded_sub) == 0) {
+                /* Shift remaining entries left */
+                memmove(&app->boundary_dirs[i], &app->boundary_dirs[i + 1],
+                        (app->boundary_dir_count - i - 1) * sizeof(*app->boundary_dirs));
+                app->boundary_dir_count--;
+                break;
+            }
+        }
+        /* Add new disc dirs (grow array if needed) */
+        if (disc_arr && disc_count > 0) {
+            int new_total = app->boundary_dir_count + disc_count;
+            char (*tmp)[META_SUBDIR_LEN] = realloc(app->boundary_dirs,
+                                                     new_total * sizeof(*tmp));
+            if (tmp) {
+                app->boundary_dirs = tmp;
+                for (int i = 0; i < disc_count; i++) {
+                    /* Only add if not already present */
+                    int dup = 0;
+                    for (int j = 0; j < app->boundary_dir_count; j++) {
+                        if (strcmp(app->boundary_dirs[j], disc_arr[i]) == 0) {
+                            dup = 1; break;
+                        }
+                    }
+                    if (!dup) {
+                        strncpy(app->boundary_dirs[app->boundary_dir_count++],
+                                disc_arr[i], META_SUBDIR_LEN - 1);
+                    }
+                }
+            }
+        }
+        free(disc_arr);
+
+        /* Mark the loaded subdir */
+        loaded_dirs_add(app, loaded_sub);
+    }
 
     free(app->filtered);
     app->filtered = app->file_count > 0
@@ -3147,6 +3424,16 @@ static void check_scan_done(App *app) {
         apply_scan_result(app);
         update_search(app);
         build_tree(app);
+        /* Process next queued subdir expansion, if any */
+        if (app->expand_queue_count > 0) {
+            char next[META_SUBDIR_LEN];
+            strncpy(next, app->expand_queue[0], META_SUBDIR_LEN - 1);
+            next[META_SUBDIR_LEN - 1] = '\0';
+            memmove(&app->expand_queue[0], &app->expand_queue[1],
+                    (app->expand_queue_count - 1) * sizeof(app->expand_queue[0]));
+            app->expand_queue_count--;
+            start_subdir_scan(app, next);
+        }
     }
 }
 
@@ -3163,9 +3450,16 @@ static void start_scan(App *app, int max_depth) {
         free(app->scan_pending);
         app->scan_pending       = NULL;
         app->scan_pending_count = 0;
+        free(app->scan_pending_disc);
+        app->scan_pending_disc       = NULL;
+        app->scan_pending_disc_count = 0;
         app->scan_done          = 0;
         app->scan_batch_ready   = 0;
         pthread_mutex_unlock(&app->scan_mutex);
+        /* If we interrupted a subdir scan, clear its state so apply_scan_result
+           doesn't mistake the incoming full-scan result as a merge. */
+        app->loading_subdir[0]  = '\0';
+        app->expand_queue_count = 0;
     }
 
     const char *dir = (app->in_lib_view && app->lib_dir[0])
@@ -3196,7 +3490,8 @@ static void start_scan(App *app, int max_depth) {
         }
     }
 
-    sa->max_depth = max_depth;
+    sa->max_depth  = max_depth;
+    sa->merge_mode = 0;
 
     app->scan_done            = 0;
     app->scan_live_count      = 0;
@@ -3204,6 +3499,72 @@ static void start_scan(App *app, int max_depth) {
     app->scan_running = 1;
     if (pthread_create(&app->scan_thread, NULL, scan_thread_fn, sa) != 0) {
         app->scan_running = 0;
+        free(sa);
+    }
+}
+
+/* -----------------------------------------------------------------------
+   start_subdir_scan — on-demand lazy expansion of a single boundary dir
+----------------------------------------------------------------------- */
+static void start_subdir_scan(App *app, const char *subdir) {
+    /* Already loaded or already loading: nothing to do */
+    if (subdir_is_loaded(app, subdir)) return;
+    if (app->loading_subdir[0] &&
+        strcmp(app->loading_subdir, subdir) == 0) return;
+
+    /* If another scan is running, queue this one */
+    if (app->scan_running) {
+        if (app->expand_queue_count < 8) {
+            /* Don't queue duplicates */
+            int dup = 0;
+            for (int i = 0; i < app->expand_queue_count; i++) {
+                if (strcmp(app->expand_queue[i], subdir) == 0) { dup = 1; break; }
+            }
+            if (!dup)
+                strncpy(app->expand_queue[app->expand_queue_count++],
+                        subdir, META_SUBDIR_LEN - 1);
+        }
+        return;
+    }
+
+    strncpy(app->loading_subdir, subdir, META_SUBDIR_LEN - 1);
+    app->loading_subdir[META_SUBDIR_LEN - 1] = '\0';
+
+    ScanArgs *sa = calloc(1, sizeof(ScanArgs));
+    if (!sa) { app->loading_subdir[0] = '\0'; return; }
+
+    sa->app = app;
+
+    /* Build absolute path to the subdir */
+    const char *root = (app->in_lib_view && app->lib_dir[0])
+                       ? app->lib_dir : app->scan_dir_path;
+    snprintf(sa->dir, META_PATH_LEN, "%s/%s", root, subdir);
+    strncpy(sa->subdir_prefix, subdir, META_SUBDIR_LEN - 1);
+    sa->max_depth  = 1;
+    sa->merge_mode = 1;
+
+    /* Copy extension filter */
+    strncpy(sa->exts_buf, app->filter_buf, sizeof(sa->exts_buf) - 1);
+    sa->exts_buf[sizeof(sa->exts_buf) - 1] = '\0';
+    sa->ext_count = 0;
+    if (app->filter_ext_count > 0) {
+        char *tok = strtok(sa->exts_buf, ",");
+        while (tok && sa->ext_count < 16) {
+            while (*tok == ' ' || *tok == '.') tok++;
+            char *end = tok + strlen(tok) - 1;
+            while (end > tok && (*end == ' ' || *end == '.')) *end-- = '\0';
+            if (*tok) sa->exts[sa->ext_count++] = tok;
+            tok = strtok(NULL, ",");
+        }
+    }
+
+    app->scan_done            = 0;
+    app->scan_live_count      = 0;
+    app->scan_batch_threshold = SCAN_BATCH_SIZE;
+    app->scan_running = 1;
+    if (pthread_create(&app->scan_thread, NULL, scan_thread_fn, sa) != 0) {
+        app->scan_running  = 0;
+        app->loading_subdir[0] = '\0';
         free(sa);
     }
 }
@@ -3222,6 +3583,11 @@ static void rescan(App *app) {
     app->filtered_count = 0;
     app->list_sel    = 0;
     app->list_offset = 0;
+    /* Reset lazy-load state */
+    boundary_dirs_free(app);
+    loaded_dirs_free(app);
+    app->expand_queue_count = 0;
+    app->loading_subdir[0]  = '\0';
     app->open_file   = -1;
     content_free(&app->content);
     memset(app->query, 0, sizeof(app->query));
@@ -3588,6 +3954,11 @@ static void handle_list_tree(App *app, int key) {
         int vi    = app->tree_view[app->tree_sel];
         TreeNode *n = &app->tree_all[vi];
         if (n->kind == NODE_DIR) {
+            /* Trigger on-demand load if this is a boundary dir not yet loaded */
+            if (!n->expanded && is_boundary_dir(app, n->subdir) &&
+                !subdir_is_loaded(app, n->subdir)) {
+                start_subdir_scan(app, n->subdir);
+            }
             n->expanded = !n->expanded;
             rebuild_view(app);
             /* Keep cursor on the same dir node */
@@ -4638,7 +5009,12 @@ void tui_run(App *app) {
     }
     free(app->scan_pending);
     app->scan_pending = NULL;
+    free(app->scan_pending_disc);
+    app->scan_pending_disc = NULL;
     pthread_mutex_destroy(&app->scan_mutex);
+
+    boundary_dirs_free(app);
+    loaded_dirs_free(app);
 
     if (app->term) {
         term_free(app->term);

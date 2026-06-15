@@ -196,6 +196,7 @@ static int rel_depth(const char *rel) {
 FileMeta *scan_dir(const char *dir, int *count_out,
                    const char * const *exts, int ext_count,
                    int max_depth,
+                   char (**disc_out)[META_SUBDIR_LEN], int *disc_count_out,
                    ScanProgressFn progress_fn, void *progress_ctx,
                    volatile int *cancel) {
     DIR *test = opendir(dir);
@@ -211,9 +212,17 @@ FileMeta *scan_dir(const char *dir, int *count_out,
     bfs_q[qtail][0] = '\0';   /* root: relative path = "" */
     qtail++;
 
+    /* Discovered (boundary) dirs: found but not recursed due to max_depth */
+    int disc_cap = 64, disc_count = 0;
+    char (*disc_arr)[META_SUBDIR_LEN] = NULL;
+    if (disc_out && disc_count_out) {
+        disc_arr = malloc(disc_cap * sizeof(*disc_arr));
+        /* non-fatal if alloc fails — we just won't track boundary dirs */
+    }
+
     int cap = 256, count = 0, last_flush = 0;
     FileMeta *files = calloc(cap, sizeof(FileMeta));
-    if (!files) { free(bfs_q); *count_out = 0; return NULL; }
+    if (!files) { free(bfs_q); free(disc_arr); *count_out = 0; return NULL; }
 
     while (qhead < qtail) {
         if (cancel && *cancel) break;
@@ -247,7 +256,25 @@ FileMeta *scan_dir(const char *dir, int *count_out,
                 if (should_skip_dir(name))  continue;
                 if (should_skip_abs(child)) continue;
                 /* Depth limit: child depth = depth(rel) + 1 */
-                if (max_depth >= 0 && rel_depth(rel) + 1 > max_depth) continue;
+                if (max_depth >= 0 && rel_depth(rel) + 1 > max_depth) {
+                    /* Record as boundary dir (discovered but not opened) */
+                    if (disc_arr) {
+                        if (disc_count >= disc_cap) {
+                            int nc = disc_cap * 2;
+                            char (*tmp)[META_SUBDIR_LEN] = realloc(disc_arr, nc * sizeof(*disc_arr));
+                            if (tmp) { disc_arr = tmp; disc_cap = nc; }
+                        }
+                        if (disc_count < disc_cap) {
+                            char rel_child[META_SUBDIR_LEN];
+                            if (rel[0])
+                                snprintf(rel_child, META_SUBDIR_LEN, "%s/%s", rel, name);
+                            else
+                                strncpy(rel_child, name, META_SUBDIR_LEN - 1);
+                            strncpy(disc_arr[disc_count++], rel_child, META_SUBDIR_LEN - 1);
+                        }
+                    }
+                    continue;
+                }
                 /* Grow BFS queue if needed */
                 if (qtail >= bfs_cap) {
                     int nc = bfs_cap * 2;
@@ -301,5 +328,13 @@ done:
     free(bfs_q);
     qsort(files, count, sizeof(FileMeta), cmp_subdir_filename);
     *count_out = count;
+
+    if (disc_out && disc_count_out) {
+        *disc_out       = disc_arr;
+        *disc_count_out = disc_count;
+    } else {
+        free(disc_arr);
+    }
+
     return files;
 }

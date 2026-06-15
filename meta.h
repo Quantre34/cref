@@ -34,11 +34,16 @@ typedef void (*ScanProgressFn)(const FileMeta *files, int count, void *ctx);
    ext_count == 0 accepts all file types.  progress_fn may be NULL.
    max_depth: max directory levels to recurse (-1 = unlimited, 0 = root only,
               1 = root + immediate subdirs, 2 = two levels deep, etc.)
+   disc_out / disc_count_out: if non-NULL, receives a heap-allocated array of
+              subdirs that were found but not recursed into due to max_depth.
+              Paths are relative to dir (same format as FileMeta.subdir).
+              Caller must free *disc_out.  Pass NULL to ignore.
    Returns heap-allocated FileMeta array (caller must free), sets *count_out.
    Returns NULL if dir cannot be opened. */
 FileMeta *scan_dir(const char *dir, int *count_out,
                    const char * const *exts, int ext_count,
                    int max_depth,
+                   char (**disc_out)[META_SUBDIR_LEN], int *disc_count_out,
                    ScanProgressFn progress_fn, void *progress_ctx,
                    volatile int *cancel);
 
