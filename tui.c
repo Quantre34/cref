@@ -1284,37 +1284,64 @@ static HLSpan *bat_parse_line(const char *bat, char *text, int tsz, int *nout) {
     const char *p = bat;
 
     while (*p) {
-        if ((unsigned char)*p == 0x1b && p[1] == '[') {
-            /* flush span */
-            if (col > span_start && cur_cp) {
-                if (n >= cap) { cap *= 2; spans = realloc(spans, cap*sizeof(HLSpan)); }
-                spans[n++] = (HLSpan){ span_start, col-span_start, cur_cp, cur_at };
-            }
-            span_start = col;
-            p += 2;
-            int pv[8], np = 0;
-            while (*p && *p != 'm') {
-                int v = 0;
-                while (*p >= '0' && *p <= '9') v = v*10 + (*p++ - '0');
-                if (np < 8) pv[np++] = v;
-                if (*p == ';') p++;
-            }
-            if (*p == 'm') p++;
-            cur_cp = 0; cur_at = 0;
-            if (np==1 && pv[0]==1)  { cur_at = A_BOLD; }
-            else if (np==1 && pv[0]==3) { cur_at = A_ITALIC; }
-            else if (np>=5 && pv[0]==38 && pv[1]==2)
-                cur_cp = bat_rgb_to_pair(pv[2], pv[3], pv[4]);
-            else if (np>=3 && pv[0]==38 && pv[1]==5) {
-                /* 256-color: approximate */
-                int idx = pv[2];
-                if (idx >= 1 && idx <= 9) cur_cp = CP_BAT_KW;
-                else if (idx == 14 || idx == 87) cur_cp = CP_BAT_TYPE;
-            }
+        if ((unsigned char)*p != 0x1b) {
+            if (tlen < tsz-1) text[tlen++] = *p;
+            col++; p++;
             continue;
         }
-        if (tlen < tsz-1) text[tlen++] = *p;
-        col++; p++;
+        /* ESC — flush current span */
+        if (col > span_start && cur_cp) {
+            if (n >= cap) { cap *= 2; spans = realloc(spans, cap*sizeof(HLSpan)); }
+            spans[n++] = (HLSpan){ span_start, col-span_start, cur_cp, cur_at };
+        }
+        span_start = col;
+        p++;  /* skip ESC */
+
+        if (*p == '[') {
+            /* CSI sequence — collect numeric params, skip to final byte (0x40–0x7e) */
+            p++;
+            int pv[8], np = 0;
+            while (*p && !(*p >= 0x40 && *p <= 0x7e)) {
+                if (*p >= '0' && *p <= '9') {
+                    int v = 0;
+                    while (*p >= '0' && *p <= '9') v = v*10 + (*p++ - '0');
+                    if (np < 8) pv[np++] = v;
+                } else {
+                    p++;  /* skip ';', '?', '!', '>' and other parameter bytes */
+                }
+            }
+            char final = *p;
+            if (*p) p++;
+
+            if (final == 'm') {
+                /* SGR — scan all params; handles compound sequences like 0;38;2;R;G;B */
+                cur_cp = 0; cur_at = 0;
+                for (int i = 0; i < np; i++) {
+                    if (pv[i] == 1) { cur_at |= A_BOLD; }
+                    else if (pv[i] == 3) { cur_at |= A_ITALIC; }
+                    else if (pv[i] == 38 && i+1 < np && pv[i+1] == 2 && i+4 < np) {
+                        cur_cp = bat_rgb_to_pair(pv[i+2], pv[i+3], pv[i+4]);
+                        break;
+                    } else if (pv[i] == 38 && i+1 < np && pv[i+1] == 5 && i+2 < np) {
+                        int idx = pv[i+2];
+                        if (idx >= 1 && idx <= 9) cur_cp = CP_BAT_KW;
+                        else if (idx == 14 || idx == 87) cur_cp = CP_BAT_TYPE;
+                        break;
+                    }
+                }
+            }
+            /* non-SGR CSI (erase, cursor movement, etc.) — already skipped, no text change */
+        } else if (*p == ']') {
+            /* OSC sequence — skip until BEL (0x07) or ST (ESC \) */
+            p++;
+            while (*p) {
+                if ((unsigned char)*p == 0x07) { p++; break; }
+                if ((unsigned char)*p == 0x1b && p[1] == '\\') { p += 2; break; }
+                p++;
+            }
+        } else if (*p) {
+            p++;  /* other 2-char ESC sequence — skip the one byte after ESC */
+        }
     }
     text[tlen] = '\0';
     /* flush tail */
