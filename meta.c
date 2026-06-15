@@ -184,8 +184,18 @@ static int cmp_subdir_filename(const void *a, const void *b) {
     return c ? c : strcmp(fa->filename, fb->filename);
 }
 
+/* Return the BFS depth of a relative path: "" → 0, "a" → 1, "a/b" → 2 */
+static int rel_depth(const char *rel) {
+    if (!rel || !rel[0]) return 0;
+    int d = 1;
+    for (const char *p = rel; *p; p++)
+        if (*p == '/') d++;
+    return d;
+}
+
 FileMeta *scan_dir(const char *dir, int *count_out,
                    const char * const *exts, int ext_count,
+                   int max_depth,
                    ScanProgressFn progress_fn, void *progress_ctx,
                    volatile int *cancel) {
     DIR *test = opendir(dir);
@@ -236,6 +246,8 @@ FileMeta *scan_dir(const char *dir, int *count_out,
             if (S_ISDIR(st.st_mode)) {
                 if (should_skip_dir(name))  continue;
                 if (should_skip_abs(child)) continue;
+                /* Depth limit: child depth = depth(rel) + 1 */
+                if (max_depth >= 0 && rel_depth(rel) + 1 > max_depth) continue;
                 /* Grow BFS queue if needed */
                 if (qtail >= bfs_cap) {
                     int nc = bfs_cap * 2;

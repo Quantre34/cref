@@ -32,10 +32,13 @@ typedef void (*ScanProgressFn)(const FileMeta *files, int count, void *ctx);
 
 /* Dynamically scans dir (BFS order) for files matching any extension in exts[].
    ext_count == 0 accepts all file types.  progress_fn may be NULL.
+   max_depth: max directory levels to recurse (-1 = unlimited, 0 = root only,
+              1 = root + immediate subdirs, 2 = two levels deep, etc.)
    Returns heap-allocated FileMeta array (caller must free), sets *count_out.
    Returns NULL if dir cannot be opened. */
 FileMeta *scan_dir(const char *dir, int *count_out,
                    const char * const *exts, int ext_count,
+                   int max_depth,
                    ScanProgressFn progress_fn, void *progress_ctx,
                    volatile int *cancel);
 

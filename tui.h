@@ -199,6 +199,7 @@ typedef struct {
     volatile int     scan_cancel;        /* set to 1 to abort running scan */
     volatile int     scan_live_count;    /* file count updated every SCAN_BATCH_SIZE */
     int              scan_batch_threshold; /* next count at which to take a full snapshot */
+    int              scan_full;          /* 1 = full (unlimited depth) scan done/running */
     int              scan_frame;         /* spinner tick counter */
     FileMeta        *scan_pending;       /* result written by thread */
     int              scan_pending_count; /* result count written by thread */

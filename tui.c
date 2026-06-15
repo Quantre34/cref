@@ -20,6 +20,7 @@ typedef struct {
     char        exts_buf[256];
     const char *exts[16];
     int         ext_count;
+    int         max_depth;  /* -1 = unlimited */
 } ScanArgs;
 
 /* Color pairs */
@@ -777,8 +778,9 @@ static void draw_status(const App *app) {
             attron(A_BOLD);
             if (app->scan_running) {
                 static const char sp[] = "|/-\\";
-                mvprintw(STATUS_Y, COLS - 18, " %c %d yükleniyor  ",
-                         sp[(app->scan_frame / 3) % 4], app->scan_live_count);
+                const char *lbl = app->scan_full ? "yükleniyor" : "hızlı tarama";
+                mvprintw(STATUS_Y, COLS - 22, " %c %d %s  ",
+                         sp[(app->scan_frame / 3) % 4], app->scan_live_count, lbl);
             } else {
                 mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
                     app->tree_view_count > 0 ? app->tree_sel + 1 : 0,
@@ -791,8 +793,9 @@ static void draw_status(const App *app) {
             attron(A_BOLD);
             if (app->scan_running) {
                 static const char sp[] = "|/-\\";
-                mvprintw(STATUS_Y, COLS - 18, " %c %d yükleniyor  ",
-                         sp[(app->scan_frame / 3) % 4], app->scan_live_count);
+                const char *lbl = app->scan_full ? "yükleniyor" : "hızlı tarama";
+                mvprintw(STATUS_Y, COLS - 22, " %c %d %s  ",
+                         sp[(app->scan_frame / 3) % 4], app->scan_live_count, lbl);
             } else {
                 mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
                     app->filtered_count > 0 ? app->list_sel + 1 : 0,
@@ -3071,6 +3074,7 @@ static void *scan_thread_fn(void *arg) {
     int count = 0;
     FileMeta *result = scan_dir(sa->dir, &count,
                                 (const char * const *)sa->exts, sa->ext_count,
+                                sa->max_depth,
                                 scan_progress_cb, app,
                                 &app->scan_cancel);
 
@@ -3146,8 +3150,9 @@ static void check_scan_done(App *app) {
     }
 }
 
-/* Launch a background scan for the current directory + filter */
-static void start_scan(App *app) {
+/* Launch a background scan for the current directory + filter.
+   max_depth: -1 = unlimited, 2 = shallow startup scan */
+static void start_scan(App *app, int max_depth) {
     /* Cancel + join any existing thread before starting a new one */
     if (app->scan_running) {
         app->scan_cancel = 1;
@@ -3191,6 +3196,8 @@ static void start_scan(App *app) {
         }
     }
 
+    sa->max_depth = max_depth;
+
     app->scan_done            = 0;
     app->scan_live_count      = 0;
     app->scan_batch_threshold = SCAN_BATCH_SIZE;
@@ -3221,7 +3228,14 @@ static void rescan(App *app) {
     app->query_len   = 0;
     build_tree(app);
 
-    start_scan(app);
+    /* Library has few files — scan fully; CWD starts shallow */
+    if (app->in_lib_view) {
+        app->scan_full = 1;
+        start_scan(app, -1);
+    } else {
+        app->scan_full = 0;
+        start_scan(app, 2);
+    }
 }
 
 static void apply_filter_and_rescan(App *app) {
@@ -3684,6 +3698,10 @@ static void handle_list_tree(App *app, int key) {
             if (app->query_len < (int)sizeof(app->query) - 2) {
                 app->query[app->query_len++] = (char)key;
                 app->query[app->query_len]   = '\0';
+                if (!app->scan_full) {
+                    app->scan_full = 1;
+                    start_scan(app, -1);
+                }
                 update_search(app);
             }
         }
@@ -3781,6 +3799,10 @@ static void handle_list_filtered(App *app, int key) {
             if (app->query_len < (int)sizeof(app->query) - 2) {
                 app->query[app->query_len++] = (char)key;
                 app->query[app->query_len]   = '\0';
+                if (!app->scan_full) {
+                    app->scan_full = 1;
+                    start_scan(app, -1);
+                }
                 update_search(app);
             }
         }
@@ -4297,6 +4319,11 @@ static void handle_search(App *app, int key) {
             app->query_len < (int)sizeof(app->query) - 2) {
             app->query[app->query_len++] = (char)key;
             app->query[app->query_len]   = '\0';
+            /* First search char: upgrade to full scan if still shallow */
+            if (!app->scan_full) {
+                app->scan_full = 1;
+                start_scan(app, -1);
+            }
             update_search(app);
         }
         break;
@@ -4519,12 +4546,22 @@ static void handle_help(App *app, int key) {
 void tui_run(App *app) {
     pthread_mutex_init(&app->scan_mutex, NULL);
 
-    /* Start background scan immediately; UI opens with empty file list */
-    start_scan(app);
+    /* Start background scan immediately; UI opens with empty file list.
+       Library is always full; CWD starts with a shallow 2-level scan. */
+    if (app->in_lib_view) {
+        app->scan_full = 1;
+        start_scan(app, -1);
+    } else {
+        app->scan_full = 0;
+        start_scan(app, 2);
+    }
 
     if (app->mode == MODE_GREP) {
-        /* Grep needs all files upfront — wait for scan to complete.
-           No cancel here: grep must have the full file list. */
+        /* Grep needs all files — if we started a shallow scan, restart full */
+        if (!app->scan_full) {
+            app->scan_full = 1;
+            start_scan(app, -1);
+        }
         if (app->scan_running) {
             pthread_join(app->scan_thread, NULL);
             app->scan_running = 0;
