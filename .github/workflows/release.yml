@@ -16,10 +16,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build universal binary
-        run: make release CFLAGS="-Wall -Wextra -std=c11 -O2 -DNDEBUG -arch x86_64 -arch arm64"
-
-      - name: Split into per-arch binaries
         run: |
+          make release \
+            CFLAGS="-Wall -Wextra -std=c11 -O2 -DNDEBUG -arch x86_64 -arch arm64" \
+            LDFLAGS="-lncurses -arch x86_64 -arch arm64"
+
+      - name: Verify and split
+        run: |
+          file cref
+          lipo -info cref
           lipo cref -thin arm64  -output cref-darwin-arm64
           lipo cref -thin x86_64 -output cref-darwin-x86_64
 
