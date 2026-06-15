@@ -113,6 +113,20 @@ static int utf8_display_col(const char *s, int byte_col) {
     return dcol;
 }
 
+/* Print s at (y,x), clipping at max_cols display columns — no wrap-around */
+static void print_clipped(int y, int x, int max_cols, const char *s) {
+    if (max_cols <= 0 || !s) return;
+    move(y, x);
+    int dcols = 0;
+    for (int i = 0; s[i] && dcols < max_cols; ) {
+        int b = utf8_char_bytes((unsigned char)s[i]);
+        dcols++;
+        for (int k = 0; k < b && s[i + k]; k++)
+            addch((unsigned char)s[i + k]);
+        i += b;
+    }
+}
+
 /* ---------------------------------------------------------------
    File-type color helpers
 --------------------------------------------------------------- */
@@ -1582,11 +1596,12 @@ static void draw_content(const App *app) {
             "  • cref --score <word>    match count",
             NULL
         };
+        int clip = COLS - RIGHT_X - 3;
         attron(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
-        mvprintw(PANEL_Y + 1, RIGHT_X + 2, "%s", msg[1]);
+        print_clipped(PANEL_Y + 1, RIGHT_X + 2, clip, msg[1]);
         attroff(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
         for (int i = 2; msg[i]; i++)
-            mvprintw(PANEL_Y + i, RIGHT_X + 2, "%s", msg[i]);
+            print_clipped(PANEL_Y + i, RIGHT_X + 2, clip, msg[i]);
         return;
     }
 
@@ -4399,12 +4414,13 @@ static const char *help_lines[] = {
 static void draw_help(const App *app) {
     (void)app;
     clear();
+    int clip = COLS - 4;
     attron(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
-    mvprintw(0, 2, "%s", help_lines[0]);
+    print_clipped(0, 2, clip, help_lines[0]);
     attroff(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
     int rows = LINES - 2;
     for (int i = 1; help_lines[i] && i <= rows; i++)
-        mvprintw(i, 2, "%s", help_lines[i]);
+        print_clipped(i, 2, clip, help_lines[i]);
 }
 
 static void handle_help(App *app, int key) {
