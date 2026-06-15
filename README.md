@@ -15,7 +15,7 @@ Browse any directory, edit files, grep across codebases — and press `Ctrl+L` t
 - **Embedded terminal** — real PTY shell inside the TUI (`Ctrl+O`)
 - **Grep mode** — search inside file contents across the whole directory
 - **Syntax highlighting** — via `bat` if installed, with built-in fallback tokenizer
-- **Build runner** — `Ctrl+B` runs `make` or compiles the open `.c` file
+- **Build runner** — `Ctrl+B` runs `make` if a Makefile exists, otherwise compiles all `.c` files in the directory with automatic library detection (~130 headers mapped to linker flags)
 
 ## Install
 
@@ -80,7 +80,8 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `Ctrl+L` | Toggle C reference library |
 | `Ctrl+N` | New file |
 | `Ctrl+D` | Delete selected file |
-| `Ctrl+B` | Build (`make` or `gcc`) |
+| `Ctrl+R` | Reload directory |
+| `Ctrl+B` | Build (`make` or `gcc` all `.c` files) |
 | `Ctrl+O` | Open embedded terminal |
 | `?` | Help overlay |
 | `q` | Quit |
@@ -96,6 +97,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `Ctrl+X` | Cut |
 | `Alt+↑` / `Alt+↓` | Move line up / down |
 | `Ctrl+D` | Duplicate line |
+| `Ctrl+R` | Reload file from disk |
 | `Shift+Alt+←/→` | Word selection |
 
 ### Grep Mode
@@ -117,7 +119,18 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 - Types: `size_t`, `ptrdiff_t`, `NULL`, `EOF`
 - Macros and more — 64 reference pages total
 
-## Build
+## Build System (Ctrl+B)
+
+Press `Ctrl+B` from any view to build the current project:
+
+- **Makefile present** → runs `make` in the project directory
+- **No Makefile** → compiles all `.c` files with `gcc -Wall -Wextra -g`, output binary named after the directory
+
+Library flags are auto-detected by scanning `#include <...>` directives across all `.c` and `.h` files in the directory. Covers ~130 headers: `math.h → -lm`, `pthread.h → -lpthread`, `ncurses.h → -lncurses`, OpenSSL, SDL2, GTK, SQLite, curl, and many more.
+
+Build output scrolls in a dedicated panel. Press `Ctrl+B` again to rebuild, `Esc` to return.
+
+## Building cref itself
 
 ```bash
 make          # debug build
