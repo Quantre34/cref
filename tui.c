@@ -352,35 +352,98 @@ static void grep_collect(App *app) {
 /* ---------------------------------------------------------------
    Tree helpers
 --------------------------------------------------------------- */
-static int is_direct_child(const char *parent, const char *child) {
-    if (parent[0] == '\0')
-        return strchr(child, '/') == NULL;
-    int plen = (int)strlen(parent);
-    if (strncmp(child, parent, plen) != 0 || child[plen] != '/') return 0;
-    return strchr(child + plen + 1, '/') == NULL;
+
+/* qsort comparator for fixed-width string arrays */
+static int qsort_strcmp(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
 }
 
+/* Binary search: first index where files[i].subdir >= target */
+static int file_lower_bound(const FileMeta *files, int n, const char *target) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(files[mid].subdir, target) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* Binary search: first index where dirs[i] >= target */
+static int dir_lower_bound(char (*dirs)[META_SUBDIR_LEN], int n, const char *target) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(dirs[mid], target) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* Count files whose subdir equals subdir or is a descendant of it.
+   Uses binary search for O(log N + results) per call. */
 static int count_files_in_subdir(const App *app, const char *subdir) {
-    int n = 0, dl = (int)strlen(subdir);
-    for (int fi = 0; fi < app->file_count; fi++) {
+    int n = 0;
+    int sl = (int)strlen(subdir);
+
+    /* Range 1: files with subdir == subdir exactly */
+    int fi0 = file_lower_bound(app->files, app->file_count, subdir);
+    for (int fi = fi0; fi < app->file_count; fi++) {
+        if (strcmp(app->files[fi].subdir, subdir) != 0) break;
+        n++;
+    }
+
+    /* Range 2: files with subdir starting with subdir+"/" */
+    char prefix[META_SUBDIR_LEN];
+    strncpy(prefix, subdir, sizeof(prefix) - 2);
+    prefix[sizeof(prefix) - 2] = '\0';
+    int plen = (int)strlen(prefix);
+    prefix[plen]     = '/';
+    prefix[plen + 1] = '\0';
+
+    int fi1 = file_lower_bound(app->files, app->file_count, prefix);
+    for (int fi = fi1; fi < app->file_count; fi++) {
         const char *s = app->files[fi].subdir;
-        if (strcmp(s, subdir) == 0 ||
-            (strncmp(s, subdir, dl) == 0 && s[dl] == '/'))
-            n++;
+        if (strncmp(s, prefix, (size_t)(sl + 1)) != 0) break;
+        n++;
     }
     return n;
 }
 
-/* Returns number of nodes added to tree_all (children only, not the dir node itself). */
-static int build_subtree(App *app, const char *prefix, int depth,
-                          char dirs[][META_SUBDIR_LEN], int dir_count) {
+/* Returns number of nodes added to tree_all (children only, not the dir node itself).
+   dirs[] must be sorted. Uses binary search to find descendants. */
+static int build_subtree(App *app, const char *prefix, int plen, int depth,
+                          char (*dirs)[META_SUBDIR_LEN], int dir_count) {
     int added = 0;
 
-    /* Add direct child dirs first (DFS order: dir then its subtree) */
-    for (int di = 0; di < dir_count; di++) {
-        if (!is_direct_child(prefix, dirs[di])) continue;
-        if (app->tree_all_count >= TREE_MAX_NODES) break;
+    /* Binary-search into dirs[] for the first descendant of prefix */
+    int di;
+    if (plen == 0) {
+        di = 0;
+    } else {
+        char marker[META_SUBDIR_LEN];
+        int mlen = plen < (int)(sizeof(marker) - 2) ? plen : (int)(sizeof(marker) - 2);
+        strncpy(marker, prefix, (size_t)mlen);
+        marker[mlen]     = '/';
+        marker[mlen + 1] = '\0';
+        di = dir_lower_bound(dirs, dir_count, marker);
+    }
 
+    /* Iterate direct-child dirs — all descendants follow contiguously after prefix+"/" */
+    while (di < dir_count && app->tree_all_count < TREE_MAX_NODES) {
+        const char *d = dirs[di];
+
+        /* Stop when d is no longer a descendant of prefix */
+        if (plen > 0 && (strncmp(d, prefix, plen) != 0 || d[plen] != '/')) break;
+
+        const char *suffix = (plen > 0) ? d + plen + 1 : d;
+        if (strchr(suffix, '/') != NULL) {
+            /* Grandchild — not a direct child, skip */
+            di++;
+            continue;
+        }
+
+        /* Direct child: add DIR node */
         int node_idx = app->tree_all_count++;
         TreeNode *n  = &app->tree_all[node_idx];
         memset(n, 0, sizeof(*n));
@@ -389,19 +452,28 @@ static int build_subtree(App *app, const char *prefix, int depth,
         n->expanded = 0;
         n->file_idx = -1;
 
-        const char *slash = strrchr(dirs[di], '/');
-        strncpy(n->name,   slash ? slash + 1 : dirs[di], sizeof(n->name)   - 1);
-        strncpy(n->subdir, dirs[di],                     sizeof(n->subdir) - 1);
+        const char *slash = strrchr(d, '/');
+        strncpy(n->name,   slash ? slash + 1 : d, sizeof(n->name)   - 1);
+        strncpy(n->subdir, d,                      sizeof(n->subdir) - 1);
 
-        int sub        = build_subtree(app, dirs[di], depth + 1, dirs, dir_count);
+        int dlen = (int)strlen(d);
+        int sub  = build_subtree(app, d, dlen, depth + 1, dirs, dir_count);
         n->subtree_size = sub;
-        n->total_files  = count_files_in_subdir(app, dirs[di]);
+        n->total_files  = count_files_in_subdir(app, d);
         added += 1 + sub;
+
+        /* Skip past d's subtree in dirs[] */
+        di++;
+        while (di < dir_count &&
+               strncmp(dirs[di], d, dlen) == 0 && dirs[di][dlen] == '/') {
+            di++;
+        }
     }
 
-    /* Then add files directly in this prefix */
-    for (int fi = 0; fi < app->file_count; fi++) {
-        if (strcmp(app->files[fi].subdir, prefix) != 0) continue;
+    /* Files directly in this prefix — O(log N + files_here) via binary search */
+    int fi0 = file_lower_bound(app->files, app->file_count, prefix);
+    for (int fi = fi0; fi < app->file_count; fi++) {
+        if (strcmp(app->files[fi].subdir, prefix) != 0) break;
         if (app->tree_all_count >= TREE_MAX_NODES) break;
 
         int node_idx = app->tree_all_count++;
@@ -410,7 +482,6 @@ static int build_subtree(App *app, const char *prefix, int depth,
         fn->kind     = NODE_FILE;
         fn->depth    = depth;
         fn->file_idx = fi;
-
         strncpy(fn->name, app->files[fi].filename, sizeof(fn->name) - 1);
         added++;
     }
@@ -438,55 +509,60 @@ static void build_tree(App *app) {
 
     if (app->file_count == 0) return;
 
-    /* Collect unique subdir paths (and all their ancestor paths) */
-#define DIR_CAP 4096
-    char (*dirs)[META_SUBDIR_LEN] = malloc(DIR_CAP * sizeof(*dirs));
-    if (!dirs) return;
-    int  dir_count = 0;
-
+    /* Step 1: Collect unique subdirs from sorted files — O(N)
+       Since files[] is sorted by subdir, duplicates are consecutive. */
+    int usub_cap = app->file_count + 1;
+    char (*usubs)[META_SUBDIR_LEN] = malloc(usub_cap * sizeof(*usubs));
+    if (!usubs) return;
+    int usub_count = 0;
+    const char *prev_sub = "";
     for (int fi = 0; fi < app->file_count; fi++) {
         const char *sub = app->files[fi].subdir;
-        if (sub[0] == '\0') continue;
+        if (!sub[0]) continue;
+        if (strcmp(sub, prev_sub) == 0) continue;
+        prev_sub = app->files[fi].subdir;
+        strncpy(usubs[usub_count++], sub, META_SUBDIR_LEN - 1);
+    }
 
-        /* Add all prefix components of sub */
+    /* Step 2: Generate ALL prefix strings — O(D × depth) */
+    int prefix_cap = usub_count * 12 + 16;
+    char (*prefixes)[META_SUBDIR_LEN] = malloc(prefix_cap * sizeof(*prefixes));
+    if (!prefixes) { free(usubs); return; }
+    int prefix_count = 0;
+    for (int ui = 0; ui < usub_count; ui++) {
         char buf[META_SUBDIR_LEN];
-        strncpy(buf, sub, sizeof(buf) - 1);
+        strncpy(buf, usubs[ui], sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
-
         char *p = buf;
         while (1) {
             char *sl = strchr(p, '/');
             if (sl) *sl = '\0';
-
-            /* buf now holds a prefix; check for duplicate */
-            int found = 0;
-            for (int di = 0; di < dir_count; di++)
-                if (strcmp(dirs[di], buf) == 0) { found = 1; break; }
-            if (!found && dir_count < DIR_CAP)
-                strncpy(dirs[dir_count++], buf, META_SUBDIR_LEN - 1);
-
+            if (prefix_count < prefix_cap)
+                strncpy(prefixes[prefix_count++], buf, META_SUBDIR_LEN - 1);
             if (!sl) break;
-            *sl = '/';
-            p   = sl + 1;
+            *sl = '/'; p = sl + 1;
         }
     }
+    free(usubs);
 
-    /* Sort dirs alphabetically (insertion sort) */
-    for (int i = 1; i < dir_count; i++) {
-        char tmp[META_SUBDIR_LEN];
-        strncpy(tmp, dirs[i], sizeof(tmp) - 1);
-        int j = i - 1;
-        while (j >= 0 && strcmp(dirs[j], tmp) > 0) {
-            strncpy(dirs[j + 1], dirs[j], META_SUBDIR_LEN - 1);
-            j--;
+    /* Step 3: Sort prefixes — O(P log P) */
+    qsort(prefixes, prefix_count, sizeof(*prefixes), qsort_strcmp);
+
+    /* Step 4: Unique → dirs[] — O(P) */
+    char (*dirs)[META_SUBDIR_LEN] = malloc((prefix_count + 1) * sizeof(*dirs));
+    if (!dirs) { free(prefixes); return; }
+    int dir_count = 0;
+    for (int i = 0; i < prefix_count; i++) {
+        if (dir_count == 0 || strcmp(prefixes[i], dirs[dir_count - 1]) != 0) {
+            strncpy(dirs[dir_count++], prefixes[i], META_SUBDIR_LEN - 1);
         }
-        strncpy(dirs[j + 1], tmp, META_SUBDIR_LEN - 1);
     }
+    free(prefixes);
 
-    build_subtree(app, "", 0, dirs, dir_count);
+    /* dirs[] is sorted; build_subtree uses binary search to find descendants */
+    build_subtree(app, "", 0, 0, dirs, dir_count);
     rebuild_view(app);
     free(dirs);
-#undef DIR_CAP
 }
 
 /* ---------------------------------------------------------------
@@ -702,7 +778,7 @@ static void draw_status(const App *app) {
             if (app->scan_running) {
                 static const char sp[] = "|/-\\";
                 mvprintw(STATUS_Y, COLS - 18, " %c %d yükleniyor  ",
-                         sp[(app->scan_frame / 3) % 4], app->file_count);
+                         sp[(app->scan_frame / 3) % 4], app->scan_live_count);
             } else {
                 mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
                     app->tree_view_count > 0 ? app->tree_sel + 1 : 0,
@@ -716,7 +792,7 @@ static void draw_status(const App *app) {
             if (app->scan_running) {
                 static const char sp[] = "|/-\\";
                 mvprintw(STATUS_Y, COLS - 18, " %c %d yükleniyor  ",
-                         sp[(app->scan_frame / 3) % 4], app->file_count);
+                         sp[(app->scan_frame / 3) % 4], app->scan_live_count);
             } else {
                 mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
                     app->filtered_count > 0 ? app->list_sel + 1 : 0,
@@ -2971,6 +3047,11 @@ static int save_file(App *app) {
 /* Called by scan_dir every SCAN_BATCH_SIZE files; runs in scan thread */
 static void scan_progress_cb(const FileMeta *files, int count, void *ctx) {
     App *app = ctx;
+    app->scan_live_count = count;   /* always update (no mutex: volatile) */
+
+    if (count < app->scan_batch_threshold) return;
+    app->scan_batch_threshold = count * 2;  /* next snapshot when file count doubles */
+
     FileMeta *snap = malloc(count * sizeof(FileMeta));
     if (!snap) return;
     memcpy(snap, files, count * sizeof(FileMeta));
@@ -3052,7 +3133,7 @@ static void check_scan_done(App *app) {
         app->filtered       = snap_count > 0 ? malloc(snap_count * sizeof(int)) : NULL;
         app->filtered_count = 0;
         update_search(app);
-        build_tree(app);
+        /* No build_tree here — too expensive for large partial results */
     }
 
     /* Apply final sorted result and join thread */
@@ -3110,7 +3191,9 @@ static void start_scan(App *app) {
         }
     }
 
-    app->scan_done    = 0;
+    app->scan_done            = 0;
+    app->scan_live_count      = 0;
+    app->scan_batch_threshold = SCAN_BATCH_SIZE;
     app->scan_running = 1;
     if (pthread_create(&app->scan_thread, NULL, scan_thread_fn, sa) != 0) {
         app->scan_running = 0;

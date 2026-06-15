@@ -197,6 +197,8 @@ typedef struct {
     volatile int     scan_done;          /* 1 = final result ready, join thread */
     volatile int     scan_batch_ready;   /* 1 = partial batch in scan_pending */
     volatile int     scan_cancel;        /* set to 1 to abort running scan */
+    volatile int     scan_live_count;    /* file count updated every SCAN_BATCH_SIZE */
+    int              scan_batch_threshold; /* next count at which to take a full snapshot */
     int              scan_frame;         /* spinner tick counter */
     FileMeta        *scan_pending;       /* result written by thread */
     int              scan_pending_count; /* result count written by thread */
