@@ -186,7 +186,8 @@ static int cmp_subdir_filename(const void *a, const void *b) {
 
 FileMeta *scan_dir(const char *dir, int *count_out,
                    const char * const *exts, int ext_count,
-                   ScanProgressFn progress_fn, void *progress_ctx) {
+                   ScanProgressFn progress_fn, void *progress_ctx,
+                   volatile int *cancel) {
     DIR *test = opendir(dir);
     if (!test) { *count_out = 0; return NULL; }
     closedir(test);
@@ -205,6 +206,7 @@ FileMeta *scan_dir(const char *dir, int *count_out,
     if (!files) { free(bfs_q); *count_out = 0; return NULL; }
 
     while (qhead < qtail) {
+        if (cancel && *cancel) break;
         const char *rel = bfs_q[qhead++];
 
         char full[META_PATH_LEN];
@@ -220,6 +222,7 @@ FileMeta *scan_dir(const char *dir, int *count_out,
 
         struct dirent *entry;
         while ((entry = readdir(d)) != NULL) {
+            if (cancel && *cancel) break;
             const char *name = entry->d_name;
             if (name[0] == '.') continue;
 

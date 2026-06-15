@@ -36,6 +36,7 @@ typedef void (*ScanProgressFn)(const FileMeta *files, int count, void *ctx);
    Returns NULL if dir cannot be opened. */
 FileMeta *scan_dir(const char *dir, int *count_out,
                    const char * const *exts, int ext_count,
-                   ScanProgressFn progress_fn, void *progress_ctx);
+                   ScanProgressFn progress_fn, void *progress_ctx,
+                   volatile int *cancel);
 
 #endif

@@ -85,7 +85,7 @@ static void usage(const char *prog) {
 static int run_score(const char *dir, const char *query,
                      const char * const *exts, int ext_count) {
     int n = 0;
-    FileMeta *files = scan_dir(dir, &n, exts, ext_count, NULL, NULL);
+    FileMeta *files = scan_dir(dir, &n, exts, ext_count, NULL, NULL, NULL);
     if (!files) {
         fprintf(stderr, "Error: cannot open directory '%s'\n", dir);
         return 1;

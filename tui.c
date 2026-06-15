@@ -686,7 +686,9 @@ static void draw_status(const App *app) {
                 "[^N] New  [^D] Del  [^T] Filter  [^L] Lib  [^G] Goto  [q] Quit");
             attron(A_BOLD);
             if (app->scan_running) {
-                mvprintw(STATUS_Y, COLS - 14, "[scanning...]");
+                static const char sp[] = "|/-\\";
+                mvprintw(STATUS_Y, COLS - 18, " %c %d yükleniyor  ",
+                         sp[(app->scan_frame / 3) % 4], app->file_count);
             } else {
                 mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
                     app->tree_view_count > 0 ? app->tree_sel + 1 : 0,
@@ -698,7 +700,9 @@ static void draw_status(const App *app) {
                 " [↑↓] Select  [→/Enter] Open  [/] Search  [^T] Filter  [q] Quit");
             attron(A_BOLD);
             if (app->scan_running) {
-                mvprintw(STATUS_Y, COLS - 14, "[scanning...]");
+                static const char sp[] = "|/-\\";
+                mvprintw(STATUS_Y, COLS - 18, " %c %d yükleniyor  ",
+                         sp[(app->scan_frame / 3) % 4], app->file_count);
             } else {
                 mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
                     app->filtered_count > 0 ? app->list_sel + 1 : 0,
@@ -719,15 +723,25 @@ static void draw_list_tree(const App *app) {
         mvhline(r, 0, ' ', LEFT_W);
 
     attron(A_BOLD | A_UNDERLINE);
-    mvprintw(PANEL_Y, 1, "%-*s", LEFT_W - 2, "Files");
+    if (app->scan_running) {
+        static const char sp[] = "|/-\\";
+        char hdr[64];
+        snprintf(hdr, sizeof(hdr), "Files %c", sp[(app->scan_frame / 3) % 4]);
+        mvprintw(PANEL_Y, 1, "%-*s", LEFT_W - 2, hdr);
+    } else {
+        mvprintw(PANEL_Y, 1, "%-*s", LEFT_W - 2, "Files");
+    }
     attroff(A_BOLD | A_UNDERLINE);
 
     if (app->tree_view_count == 0) {
         attron(COLOR_PAIR(CP_SUGGEST));
-        if (app->scan_running)
-            mvprintw(PANEL_Y + 1, 2, "Scanning...");
-        else
+        if (app->scan_running) {
+            static const char sp[] = "|/-\\";
+            mvprintw(PANEL_Y + 1, 2, "%c yükleniyor...",
+                     sp[(app->scan_frame / 3) % 4]);
+        } else {
             mvprintw(PANEL_Y + 1, 2, "No files found.");
+        }
         attroff(COLOR_PAIR(CP_SUGGEST));
         return;
     }
@@ -2961,7 +2975,8 @@ static void *scan_thread_fn(void *arg) {
     int count = 0;
     FileMeta *result = scan_dir(sa->dir, &count,
                                 (const char * const *)sa->exts, sa->ext_count,
-                                scan_progress_cb, app);
+                                scan_progress_cb, app,
+                                &app->scan_cancel);
 
     /* Store sorted final result; clear any unread partial batch */
     pthread_mutex_lock(&app->scan_mutex);
@@ -3037,11 +3052,12 @@ static void check_scan_done(App *app) {
 
 /* Launch a background scan for the current directory + filter */
 static void start_scan(App *app) {
-    /* Join any existing thread before starting a new one */
+    /* Cancel + join any existing thread before starting a new one */
     if (app->scan_running) {
+        app->scan_cancel = 1;
         pthread_join(app->scan_thread, NULL);
         app->scan_running = 0;
-        /* Discard stale pending result */
+        app->scan_cancel  = 0;
         pthread_mutex_lock(&app->scan_mutex);
         free(app->scan_pending);
         app->scan_pending       = NULL;
@@ -4408,7 +4424,8 @@ void tui_run(App *app) {
     start_scan(app);
 
     if (app->mode == MODE_GREP) {
-        /* Grep needs all files upfront — wait for scan to complete */
+        /* Grep needs all files upfront — wait for scan to complete.
+           No cancel here: grep must have the full file list. */
         if (app->scan_running) {
             pthread_join(app->scan_thread, NULL);
             app->scan_running = 0;
@@ -4440,6 +4457,8 @@ void tui_run(App *app) {
 
         /* Pick up completed scan results */
         check_scan_done(app);
+
+        if (app->scan_running) app->scan_frame++;
 
         if (key == ERR) continue;  /* timeout, no key pressed */
 
@@ -4475,8 +4494,9 @@ void tui_run(App *app) {
 
     if (klog) fclose(klog);
 
-    /* Join any still-running scan thread before cleanup */
+    /* Cancel + join any still-running scan thread before cleanup */
     if (app->scan_running) {
+        app->scan_cancel = 1;
         pthread_join(app->scan_thread, NULL);
         app->scan_running = 0;
     }
