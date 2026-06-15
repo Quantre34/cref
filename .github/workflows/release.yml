@@ -9,34 +9,45 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            artifact: cref-darwin-arm64
-          - os: macos-13
-            artifact: cref-darwin-x86_64
-          - os: ubuntu-latest
-            artifact: cref-linux-x86_64
-
+  build-macos:
+    name: Build macOS (universal)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Build universal binary
+        run: make release CFLAGS="-Wall -Wextra -std=c11 -O2 -DNDEBUG -arch x86_64 -arch arm64"
+
+      - name: Split into per-arch binaries
+        run: |
+          lipo cref -thin arm64  -output cref-darwin-arm64
+          lipo cref -thin x86_64 -output cref-darwin-x86_64
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cref-darwin-arm64
+            cref-darwin-x86_64
+          generate_release_notes: false
+
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: sudo apt-get install -y libncurses-dev
 
       - name: Build
         run: make release
 
       - name: Rename binary
-        run: mv cref ${{ matrix.artifact }}
+        run: mv cref cref-linux-x86_64
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
-          generate_release_notes: true
+          files: cref-linux-x86_64
+          generate_release_notes: false
