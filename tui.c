@@ -2258,6 +2258,11 @@ static void load_content(App *app, int file_idx) {
         }
         app->content.lines[app->content.line_count++] = strdup(line);
     }
+    /* Empty file: ensure at least one empty line so editors can place cursor */
+    if (app->content.line_count == 0) {
+        app->content.lines[0] = strdup("");
+        app->content.line_count = 1;
+    }
     app->content.capacity = cap;
 
     fclose(f);
@@ -3535,10 +3540,14 @@ static void start_subdir_scan(App *app, const char *subdir) {
 
     sa->app = app;
 
-    /* Build absolute path to the subdir */
+    /* Build absolute path to the subdir (avoid double slash when root is "/") */
     const char *root = (app->in_lib_view && app->lib_dir[0])
                        ? app->lib_dir : app->scan_dir_path;
-    snprintf(sa->dir, META_PATH_LEN, "%s/%s", root, subdir);
+    size_t rlen = strlen(root);
+    if (rlen > 0 && root[rlen - 1] == '/')
+        snprintf(sa->dir, META_PATH_LEN, "%s%s", root, subdir);
+    else
+        snprintf(sa->dir, META_PATH_LEN, "%s/%s", root, subdir);
     strncpy(sa->subdir_prefix, subdir, META_SUBDIR_LEN - 1);
     sa->max_depth  = 1;
     sa->merge_mode = 1;
@@ -4051,6 +4060,10 @@ static void handle_list_tree(App *app, int key) {
         }
         break;
 
+    case 18: /* Ctrl+R — reload directory */
+        rescan(app);
+        break;
+
     case '?':
         app->help_prev_mode = MODE_LIST;
         app->mode = MODE_HELP;
@@ -4150,6 +4163,10 @@ static void handle_list_filtered(App *app, int key) {
             app->in_lib_view ^= 1;
             rescan(app);
         }
+        break;
+
+    case 18: /* Ctrl+R — reload directory */
+        rescan(app);
         break;
 
     case 15: /* Ctrl+O — toggle command panel */
@@ -4279,6 +4296,21 @@ static void handle_content(App *app, int key) {
         }
         break;
 
+    case 14: /* Ctrl+N — new file */
+        enter_new_file_mode(app);
+        break;
+
+    case 18: /* Ctrl+R — reload file from disk */
+        if (app->open_file >= 0) {
+            int saved_offset = app->content_offset;
+            load_content(app, app->open_file);
+            app->content_offset = saved_offset;
+            if (app->content_offset > app->content.line_count - 1)
+                app->content_offset = app->content.line_count > 0
+                                      ? app->content.line_count - 1 : 0;
+        }
+        break;
+
     case 2: /* Ctrl+B — build */
         do_build(app);
         break;
@@ -4331,6 +4363,20 @@ static void handle_edit(App *app, int key) {
     /* Save */
     case 's' & 0x1F:
         if (save_file(app)) app->save_flash = 3;
+        break;
+
+    /* Reload file from disk (discards unsaved changes) */
+    case 'r' & 0x1F:
+        if (app->open_file >= 0) {
+            app->cursor_row     = 0;
+            app->cursor_col     = 0;
+            app->content_offset = 0;
+            sel_clear(app);
+            load_content(app, app->open_file);
+            app->content_dirty = 0;
+            app->mode = MODE_CONTENT;
+            curs_set(0);
+        }
         break;
 
     /* Build */
