@@ -7,6 +7,7 @@
 #include <locale.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 
 static int dir_exists(const char *path) {
@@ -83,12 +84,10 @@ static void usage(const char *prog) {
 /* --score: count literal occurrences of query in each file, print sorted. */
 static int run_score(const char *dir, const char *query,
                      const char * const *exts, int ext_count) {
-    FileMeta *files = calloc(META_MAX_FILES, sizeof(FileMeta));
-    if (!files) { fprintf(stderr, "Out of memory\n"); return 1; }
-    int n = scan_dir(dir, files, META_MAX_FILES, exts, ext_count);
-    if (n < 0) {
+    int n = 0;
+    FileMeta *files = scan_dir(dir, &n, exts, ext_count);
+    if (!files) {
         fprintf(stderr, "Error: cannot open directory '%s'\n", dir);
-        free(files);
         return 1;
     }
     if (n == 0) {
@@ -98,7 +97,8 @@ static int run_score(const char *dir, const char *query,
     }
 
     typedef struct { int idx; int count; } SC;
-    SC scores[META_MAX_FILES];
+    SC *scores = malloc(n * sizeof(SC));
+    if (!scores) { free(files); fprintf(stderr, "Out of memory\n"); return 1; }
     int sc_n  = 0;
     int total = 0;
     int qlen  = (int)strlen(query);
@@ -150,6 +150,7 @@ static int run_score(const char *dir, const char *query,
     printf("────────────────────────────────────────────────\n");
     printf("  %4d  matches in %d file%s\n\n",
            total, sc_n, sc_n == 1 ? "" : "s");
+    free(scores);
     free(files);
     return 0;
 }
@@ -242,16 +243,18 @@ int main(int argc, char *argv[]) {
     }
     /* filter_ext_count == 0 means show all file types */
 
-    app->file_count = scan_dir(dir, app->files, META_MAX_FILES,
-                               (const char * const *)app->filter_exts,
-                               app->filter_ext_count);
-    if (app->file_count < 0) {
-        fprintf(stderr, "Error: cannot open directory '%s'\n", dir);
-        fprintf(stderr, "Tip: use -d <dir>, or pass a directory path.\n");
-        free(app);
-        return 1;
+    /* Pre-validate directory before entering TUI */
+    {
+        DIR *test = opendir(dir);
+        if (!test) {
+            fprintf(stderr, "Error: cannot open directory '%s'\n", dir);
+            fprintf(stderr, "Tip: use -d <dir>, or pass a directory path.\n");
+            free(app);
+            return 1;
+        }
+        closedir(test);
     }
-    /* file_count == 0 is allowed (empty dir); the TUI shows "No files found" */
+    /* Files are loaded by the background scan thread started in tui_run */
 
     if (grep_query) {
         strncpy(app->grep_query, grep_query, sizeof(app->grep_query) - 1);
@@ -269,6 +272,8 @@ int main(int argc, char *argv[]) {
     content_free(&app->compile_out);
     clipboard_free(app);
     bat_free(app);
+    free(app->files);
+    free(app->filtered);
     free(app);
     return 0;
 }

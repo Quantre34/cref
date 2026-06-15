@@ -132,10 +132,13 @@ static int cmp_score(const void *a, const void *b) {
 
 int search(const FileMeta *files, int n, const char *query,
            int *indices, int max) {
-    ScoreEntry results[META_MAX_FILES];
+    if (n <= 0 || max <= 0) return 0;
+
+    ScoreEntry *results = malloc(n * sizeof(ScoreEntry));
+    if (!results) return 0;
     int count = 0;
 
-    for (int i = 0; i < n && count < META_MAX_FILES; i++) {
+    for (int i = 0; i < n; i++) {
         int s = file_score(&files[i], query);
         if (s > 0) {
             results[count].idx   = i;
@@ -148,6 +151,7 @@ int search(const FileMeta *files, int n, const char *query,
 
     int ret = count < max ? count : max;
     for (int i = 0; i < ret; i++) indices[i] = results[i].idx;
+    free(results);
     return ret;
 }
 

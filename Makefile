@@ -9,7 +9,7 @@ BINDIR   = $(PREFIX)/bin
 DATADIR  = $(PREFIX)/share/cref/ref
 
 UNAME   := $(shell uname -s)
-LDFLAGS  = -lncurses
+LDFLAGS  = -lncurses -lpthread
 ifeq ($(UNAME), Linux)
     LDFLAGS += -lutil
 endif

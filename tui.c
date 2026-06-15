@@ -11,6 +11,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
+
+/* Arguments passed to the background scan thread */
+typedef struct {
+    App        *app;
+    char        dir[META_PATH_LEN];
+    char        exts_buf[256];
+    const char *exts[16];
+    int         ext_count;
+} ScanArgs;
 
 /* Color pairs */
 #define CP_HEADER    1
@@ -415,8 +425,9 @@ static void build_tree(App *app) {
     if (app->file_count == 0) return;
 
     /* Collect unique subdir paths (and all their ancestor paths) */
-#define DIR_CAP 256
-    char dirs[DIR_CAP][META_SUBDIR_LEN];
+#define DIR_CAP 4096
+    char (*dirs)[META_SUBDIR_LEN] = malloc(DIR_CAP * sizeof(*dirs));
+    if (!dirs) return;
     int  dir_count = 0;
 
     for (int fi = 0; fi < app->file_count; fi++) {
@@ -460,6 +471,7 @@ static void build_tree(App *app) {
 
     build_subtree(app, "", 0, dirs, dir_count);
     rebuild_view(app);
+    free(dirs);
 #undef DIR_CAP
 }
 
@@ -622,6 +634,14 @@ static void draw_status(const App *app) {
         attron(A_BOLD);
         mvprintw(STATUS_Y, COLS - 27, "(Enter=apply  Esc=cancel)");
         attroff(A_BOLD);
+    } else if (app->mode == MODE_GOTO) {
+        mvprintw(STATUS_Y, 1, " Go to: %s", app->goto_buf);
+        attron(A_BLINK | A_BOLD);
+        mvaddch(STATUS_Y, 9 + app->goto_len, '_');
+        attroff(A_BLINK | A_BOLD);
+        attron(A_BOLD);
+        mvprintw(STATUS_Y, COLS - 27, "(Enter=open  Esc=cancel)");
+        attroff(A_BOLD);
     } else if (app->mode == MODE_NEW_FILE) {
         const char *sub = new_file_target_subdir(app);
         if (sub[0])
@@ -663,19 +683,27 @@ static void draw_status(const App *app) {
         if (app->query[0] == '\0') {
             mvprintw(STATUS_Y, 1,
                 " [↑↓] Navigate  [→] Open  [/] Search  "
-                "[^N] New  [^D] Del  [^T] Filter  [^L] Library  [q] Quit");
+                "[^N] New  [^D] Del  [^T] Filter  [^L] Lib  [^G] Goto  [q] Quit");
             attron(A_BOLD);
-            mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
-                app->tree_view_count > 0 ? app->tree_sel + 1 : 0,
-                app->tree_view_count);
+            if (app->scan_running) {
+                mvprintw(STATUS_Y, COLS - 14, "[scanning...]");
+            } else {
+                mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
+                    app->tree_view_count > 0 ? app->tree_sel + 1 : 0,
+                    app->tree_view_count);
+            }
             attroff(A_BOLD);
         } else {
             mvprintw(STATUS_Y, 1,
                 " [↑↓] Select  [→/Enter] Open  [/] Search  [^T] Filter  [q] Quit");
             attron(A_BOLD);
-            mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
-                app->filtered_count > 0 ? app->list_sel + 1 : 0,
-                app->filtered_count);
+            if (app->scan_running) {
+                mvprintw(STATUS_Y, COLS - 14, "[scanning...]");
+            } else {
+                mvprintw(STATUS_Y, COLS - 12, "[%d/%d]",
+                    app->filtered_count > 0 ? app->list_sel + 1 : 0,
+                    app->filtered_count);
+            }
             attroff(A_BOLD);
         }
     }
@@ -696,7 +724,10 @@ static void draw_list_tree(const App *app) {
 
     if (app->tree_view_count == 0) {
         attron(COLOR_PAIR(CP_SUGGEST));
-        mvprintw(PANEL_Y + 1, 2, "No files found.");
+        if (app->scan_running)
+            mvprintw(PANEL_Y + 1, 2, "Scanning...");
+        else
+            mvprintw(PANEL_Y + 1, 2, "No files found.");
         attroff(COLOR_PAIR(CP_SUGGEST));
         return;
     }
@@ -743,10 +774,12 @@ static void draw_list_tree(const App *app) {
                 info);
         } else {
             int fi = n->file_idx;
-            int lc = (fi >= 0) ? app->files[fi].line_count : 0;
-            int is_bin = (fi >= 0) ? app->files[fi].binary : 0;
+            int lc     = (fi >= 0) ? app->files[fi].line_count  : 0;
+            int is_bin = (fi >= 0) ? app->files[fi].binary       : 0;
+            int no_rd  = (fi >= 0) ? app->files[fi].unreadable   : 0;
             char info[12] = "";
-            if (is_bin) snprintf(info, sizeof(info), " bin");
+            if (no_rd)  snprintf(info, sizeof(info), " ---");
+            else if (is_bin) snprintf(info, sizeof(info), " bin");
             else if (lc > 0) snprintf(info, sizeof(info), " %dL", lc);
             int info_w = (int)strlen(info);
             int name_w = avail - info_w;
@@ -757,10 +790,11 @@ static void draw_list_tree(const App *app) {
             name[sizeof(name) - 1] = '\0';
             if ((int)strlen(name) > name_w) name[name_w] = '\0';
 
-            /* Apply ext color only when not selected (selection color overrides) */
+            /* Dim unreadable files; apply ext color only when not selected */
+            if (no_rd && !pair) attron(A_DIM);
             int ext_pair = 0;
             if (!pair && fi >= 0) {
-                if (is_bin)
+                if (is_bin || no_rd)
                     ext_pair = CP_EXT_BIN;
                 else
                     ext_pair = ext_color_pair(file_ext(app->files[fi].filename));
@@ -774,15 +808,16 @@ static void draw_list_tree(const App *app) {
                 info);
 
             if (ext_pair) attroff(COLOR_PAIR(ext_pair));
+            if (no_rd && !pair) attroff(A_DIM);
         }
 
         if (pair) attroff(COLOR_PAIR(pair) | A_BOLD);
     }
 
     /* Truncation notice */
-    if (app->file_count >= META_MAX_FILES) {
+    if (app->file_count >= META_SCAN_SOFTCAP) {
         attron(COLOR_PAIR(CP_SUGGEST) | A_BOLD);
-        mvprintw(PANEL_Y + view_h, 1, "…%d+ files", META_MAX_FILES);
+        mvprintw(PANEL_Y + view_h, 1, "…%d+ files (soft cap)", META_SCAN_SOFTCAP);
         attroff(COLOR_PAIR(CP_SUGGEST) | A_BOLD);
     }
 }
@@ -828,9 +863,10 @@ static void draw_list_filtered(const App *app) {
         int name_w = LEFT_W - 3;
         if ((int)strlen(name) > name_w) name[name_w] = '\0';
 
+        if (fm->unreadable && !pair) attron(A_DIM);
         int ext_pair = 0;
         if (!pair) {
-            if (fm->binary)
+            if (fm->binary || fm->unreadable)
                 ext_pair = CP_EXT_BIN;
             else
                 ext_pair = ext_color_pair(file_ext(fm->filename));
@@ -840,6 +876,7 @@ static void draw_list_filtered(const App *app) {
         mvprintw(row, 0, "%s %-*s", arrow, name_w, name);
 
         if (ext_pair) attroff(COLOR_PAIR(ext_pair));
+        if (fm->unreadable && !pair) attroff(A_DIM);
         if (pair) attroff(COLOR_PAIR(pair) | A_BOLD);
     }
 
@@ -1945,10 +1982,17 @@ static void redraw(const App *app) {
 --------------------------------------------------------------- */
 static void update_search(App *app) {
     app->suggestion[0] = '\0';
+    app->filtered_count = 0;
+
+    if (!app->files || app->file_count == 0 || !app->filtered) {
+        app->list_sel    = 0;
+        app->list_offset = 0;
+        return;
+    }
 
     app->filtered_count = search(app->files, app->file_count,
                                  app->query,
-                                 app->filtered, META_MAX_FILES);
+                                 app->filtered, app->file_count);
 
     if (app->filtered_count == 0 && app->query[0])
         find_suggestion(app->files, app->file_count,
@@ -1964,6 +2008,19 @@ static void update_search(App *app) {
 static void load_content(App *app, int file_idx) {
     content_free(&app->content);
     bat_free(app);
+
+    if (app->files[file_idx].unreadable) {
+        int cap = 2;
+        app->content.lines    = malloc(cap * sizeof(char *));
+        if (!app->content.lines) return;
+        app->content.lines[0] = strdup("[Permission denied]");
+        app->content.line_count = 1;
+        app->content.capacity   = cap;
+        app->open_file          = file_idx;
+        app->content_offset     = 0;
+        app->mode               = MODE_CONTENT;
+        return;
+    }
 
     if (app->files[file_idx].binary) {
         int cap = 2;
@@ -2885,33 +2942,128 @@ static int save_file(App *app) {
 }
 
 /* ---------------------------------------------------------------
-   Rescan + filter helpers
+   Background scan thread
 --------------------------------------------------------------- */
 
-static void rescan(App *app) {
+static void *scan_thread_fn(void *arg) {
+    ScanArgs *sa = arg;
+    App *app = sa->app;
+
+    int count = 0;
+    FileMeta *result = scan_dir(sa->dir, &count,
+                                (const char * const *)sa->exts, sa->ext_count);
+
+    pthread_mutex_lock(&app->scan_mutex);
+    free(app->scan_pending);
+    app->scan_pending       = result;
+    app->scan_pending_count = count;
+    app->scan_done          = 1;
+    pthread_mutex_unlock(&app->scan_mutex);
+
+    free(sa);
+    return NULL;
+}
+
+/* Apply completed scan results (call after joining the thread) */
+static void apply_scan_result(App *app) {
+    pthread_mutex_lock(&app->scan_mutex);
+    free(app->files);
+    app->files      = app->scan_pending;
+    app->file_count = app->scan_pending_count;
+    app->scan_pending       = NULL;
+    app->scan_pending_count = 0;
+    app->scan_done          = 0;
+    pthread_mutex_unlock(&app->scan_mutex);
+
+    free(app->filtered);
+    app->filtered = app->file_count > 0
+                    ? malloc(app->file_count * sizeof(int)) : NULL;
+    app->filtered_count = 0;
+}
+
+/* Check if background scan finished; if so, swap results in */
+static void check_scan_done(App *app) {
+    if (!app->scan_running || !app->scan_done) return;
+
+    pthread_join(app->scan_thread, NULL);
+    app->scan_running = 0;
+    apply_scan_result(app);
+    update_search(app);
+    build_tree(app);
+}
+
+/* Launch a background scan for the current directory + filter */
+static void start_scan(App *app) {
+    /* Join any existing thread before starting a new one */
+    if (app->scan_running) {
+        pthread_join(app->scan_thread, NULL);
+        app->scan_running = 0;
+        /* Discard stale pending result */
+        pthread_mutex_lock(&app->scan_mutex);
+        free(app->scan_pending);
+        app->scan_pending       = NULL;
+        app->scan_pending_count = 0;
+        app->scan_done          = 0;
+        pthread_mutex_unlock(&app->scan_mutex);
+    }
+
     const char *dir = (app->in_lib_view && app->lib_dir[0])
                       ? app->lib_dir : app->scan_dir_path;
     if (!dir[0]) return;
 
-    /* Show feedback before the potentially slow scan */
-    attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
-    mvhline(STATUS_Y, 0, ' ', COLS);
-    mvprintw(STATUS_Y, 1, " Scanning %s ...", dir);
-    attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
-    refresh();
+    ScanArgs *sa = malloc(sizeof(ScanArgs));
+    if (!sa) return;
+    memset(sa, 0, sizeof(*sa));
 
-    app->file_count = scan_dir(dir, app->files, META_MAX_FILES,
-                               (const char * const *)app->filter_exts,
-                               app->filter_ext_count);
-    if (app->file_count < 0) app->file_count = 0;
+    sa->app = app;
+    strncpy(sa->dir, dir, META_PATH_LEN - 1);
+    sa->dir[META_PATH_LEN - 1] = '\0';
+
+    /* Copy the extension filter so the thread has its own copy */
+    strncpy(sa->exts_buf, app->filter_buf, sizeof(sa->exts_buf) - 1);
+    sa->exts_buf[sizeof(sa->exts_buf) - 1] = '\0';
+    sa->ext_count = 0;
+    if (app->filter_ext_count > 0) {
+        /* Re-parse pointers into our local exts_buf */
+        char *tok = strtok(sa->exts_buf, ",");
+        while (tok && sa->ext_count < 16) {
+            while (*tok == ' ' || *tok == '.') tok++;
+            char *end = tok + strlen(tok) - 1;
+            while (end > tok && (*end == ' ' || *end == '.')) *end-- = '\0';
+            if (*tok) sa->exts[sa->ext_count++] = tok;
+            tok = strtok(NULL, ",");
+        }
+    }
+
+    app->scan_done    = 0;
+    app->scan_running = 1;
+    if (pthread_create(&app->scan_thread, NULL, scan_thread_fn, sa) != 0) {
+        app->scan_running = 0;
+        free(sa);
+    }
+}
+
+/* ---------------------------------------------------------------
+   Rescan + filter helpers
+--------------------------------------------------------------- */
+
+static void rescan(App *app) {
+    /* Clear current state immediately so UI shows empty / scanning */
+    free(app->files);
+    app->files      = NULL;
+    app->file_count = 0;
+    free(app->filtered);
+    app->filtered       = NULL;
+    app->filtered_count = 0;
     app->list_sel    = 0;
     app->list_offset = 0;
     app->open_file   = -1;
     content_free(&app->content);
     memset(app->query, 0, sizeof(app->query));
     app->query_len   = 0;
-    update_search(app);
     build_tree(app);
+
+    start_scan(app);
 }
 
 static void apply_filter_and_rescan(App *app) {
@@ -2927,6 +3079,38 @@ static void apply_filter_and_rescan(App *app) {
         tok = strtok(NULL, ",");
     }
     rescan(app);
+}
+
+static void handle_goto(App *app, int key) {
+    switch (key) {
+    case '\n': case '\r': {
+        struct stat st;
+        if (stat(app->goto_buf, &st) == 0 && S_ISDIR(st.st_mode)) {
+            strncpy(app->scan_dir_path, app->goto_buf, META_PATH_LEN - 1);
+            app->in_lib_view = 0;
+            app->mode        = MODE_LIST;
+            curs_set(0);
+            rescan(app);
+        }
+        /* if invalid dir, stay in MODE_GOTO so user can correct */
+        break;
+    }
+    case 27: /* Esc */
+        app->mode = MODE_LIST;
+        curs_set(0);
+        break;
+    case KEY_BACKSPACE: case 127: case '\b':
+        if (app->goto_len > 0)
+            app->goto_buf[--app->goto_len] = '\0';
+        break;
+    default:
+        if (key >= 32 && key < 127 &&
+            app->goto_len < (int)sizeof(app->goto_buf) - 2) {
+            app->goto_buf[app->goto_len++] = (char)key;
+            app->goto_buf[app->goto_len]   = '\0';
+        }
+        break;
+    }
 }
 
 static void handle_filter(App *app, int key) {
@@ -3307,6 +3491,13 @@ static void handle_list_tree(App *app, int key) {
         app->mode = MODE_FILTER;
         break;
 
+    case 7: /* Ctrl+G — go to directory */
+        app->goto_buf[0] = '\0';
+        app->goto_len    = 0;
+        app->mode        = MODE_GOTO;
+        curs_set(1);
+        break;
+
     case 12: /* Ctrl+L — toggle library / CWD */
         if (app->lib_dir[0]) {
             app->in_lib_view ^= 1;
@@ -3395,6 +3586,13 @@ static void handle_list_filtered(App *app, int key) {
     case 20: /* Ctrl+T — filetype filter */
         init_filter_input(app);
         app->mode = MODE_FILTER;
+        break;
+
+    case 7: /* Ctrl+G — go to directory */
+        app->goto_buf[0] = '\0';
+        app->goto_len    = 0;
+        app->mode        = MODE_GOTO;
+        curs_set(1);
         break;
 
     case 12: /* Ctrl+L — toggle library / CWD */
@@ -4160,11 +4358,23 @@ static void handle_help(App *app, int key) {
    Main loop
 --------------------------------------------------------------- */
 void tui_run(App *app) {
+    pthread_mutex_init(&app->scan_mutex, NULL);
+
+    /* Start background scan immediately; UI opens with empty file list */
+    start_scan(app);
+
+    if (app->mode == MODE_GREP) {
+        /* Grep needs all files upfront — wait for scan to complete */
+        if (app->scan_running) {
+            pthread_join(app->scan_thread, NULL);
+            app->scan_running = 0;
+            apply_scan_result(app);
+        }
+        grep_collect(app);
+    }
+
     update_search(app);
     build_tree(app);
-
-    if (app->mode == MODE_GREP)
-        grep_collect(app);
 
     /* Optional key-press log for diagnosing terminal escape sequences.
        Enable with: CREF_KEYLOG=/tmp/keys.log cref ... */
@@ -4173,8 +4383,9 @@ void tui_run(App *app) {
     if (klog_path && *klog_path) klog = fopen(klog_path, "w");
 
     while (!app->quit) {
-        /* Poll at 50 ms when PTY is alive so the display stays live */
-        timeout((app->term && app->term->alive) ? 50 : -1);
+        /* Poll at 50 ms while scanning or PTY is alive */
+        int need_poll = app->scan_running || (app->term && app->term->alive);
+        timeout(need_poll ? 50 : -1);
 
         redraw(app);
         int key = getch();
@@ -4182,6 +4393,9 @@ void tui_run(App *app) {
         /* Drain any pending PTY output before processing keys */
         if (app->term)
             term_pump(app->term);
+
+        /* Pick up completed scan results */
+        check_scan_done(app);
 
         if (key == ERR) continue;  /* timeout, no key pressed */
 
@@ -4206,6 +4420,7 @@ void tui_run(App *app) {
         case MODE_EDIT:        handle_edit(app, key);        break;
         case MODE_EDIT_FIND:   handle_edit_find(app, key);   break;
         case MODE_FILTER:      handle_filter(app, key);      break;
+        case MODE_GOTO:        handle_goto(app, key);        break;
         case MODE_NEW_FILE:    handle_new_file(app, key);    break;
         case MODE_CONFIRM_DEL: handle_confirm_del(app, key); break;
         case MODE_COMPILE_OUT: handle_compile_out(app, key); break;
@@ -4215,6 +4430,15 @@ void tui_run(App *app) {
     }
 
     if (klog) fclose(klog);
+
+    /* Join any still-running scan thread before cleanup */
+    if (app->scan_running) {
+        pthread_join(app->scan_thread, NULL);
+        app->scan_running = 0;
+    }
+    free(app->scan_pending);
+    app->scan_pending = NULL;
+    pthread_mutex_destroy(&app->scan_mutex);
 
     if (app->term) {
         term_free(app->term);

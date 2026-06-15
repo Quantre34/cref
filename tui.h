@@ -4,9 +4,10 @@
 #include "meta.h"
 #include "term.h"
 #include <ncurses.h>
+#include <pthread.h>
 
 #define GREP_MAX_HITS  1000
-#define TREE_MAX_NODES 2200
+#define TREE_MAX_NODES 10000
 #define UNDO_CAP       200
 
 typedef struct {
@@ -25,6 +26,7 @@ typedef enum {
     MODE_EDIT,
     MODE_EDIT_FIND,   /* in-file find prompt over the editor */
     MODE_FILTER,      /* Ctrl+T: file-type extension filter prompt */
+    MODE_GOTO,        /* Ctrl+G: go to directory prompt */
     MODE_NEW_FILE,    /* Ctrl+N: new file name prompt */
     MODE_CONFIRM_DEL, /* Ctrl+D: delete confirmation prompt */
     MODE_COMPILE_OUT, /* Ctrl+B: build output viewer */
@@ -73,13 +75,13 @@ typedef struct {
 } UndoEntry;
 
 typedef struct {
-    /* File database */
-    FileMeta files[META_MAX_FILES];
-    int      file_count;
+    /* File database — heap allocated, may be NULL while scanning */
+    FileMeta *files;
+    int       file_count;
 
-    /* Search results (indices into files[]) */
-    int filtered[META_MAX_FILES];
-    int filtered_count;
+    /* Search results (indices into files[]) — heap allocated */
+    int *filtered;
+    int  filtered_count;
 
     /* Search box */
     char query[128];
@@ -140,9 +142,7 @@ typedef struct {
     int  find_query_len;
     int  find_match_count;   /* total matches in file (recomputed on query change) */
 
-    /* Diagnostic: last received key code (shown in MODE_EDIT status bar)
-       so the user can see which sequence their terminal sends for combos like
-       Shift+Opt+Arrow — needed to verify Terminal.app meta-key config. */
+    /* Diagnostic: last received key code (shown in MODE_EDIT status bar) */
     int last_key;
 
     /* Directory state */
@@ -156,6 +156,10 @@ typedef struct {
     int  filter_input_len;
     const char *filter_exts[16];       /* pointers into filter_buf */
     int  filter_ext_count;             /* 0 = show all file types */
+
+    /* Go-to directory (Ctrl+G) */
+    char goto_buf[META_PATH_LEN];
+    int  goto_len;
 
     /* New-file prompt (MODE_NEW_FILE) */
     char new_file_buf[META_NAME_LEN];
@@ -185,6 +189,14 @@ typedef struct {
     Term   *term;
     int     term_panel_open;
     int     term_prev_mode;
+
+    /* Background scan thread */
+    pthread_t        scan_thread;
+    pthread_mutex_t  scan_mutex;
+    volatile int     scan_running;       /* 1 = thread is active */
+    volatile int     scan_done;          /* 1 = thread finished, pick up results */
+    FileMeta        *scan_pending;       /* result written by thread */
+    int              scan_pending_count; /* result count written by thread */
 
     Mode mode;
     int  quit;

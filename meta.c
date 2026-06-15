@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static char *trim(char *s) {
     while (isspace((unsigned char)*s)) s++;
@@ -44,13 +45,11 @@ static void read_frontmatter(const char *path, FileMeta *meta) {
             }
             if (!in_fm) {
                 past_fm = 1;
-                /* first line is body — fall through to snippet capture */
             } else if (strcmp(line, "---") == 0) {
                 in_fm   = 0;
                 past_fm = 1;
                 continue;
             } else {
-                /* inside frontmatter: parse key:value */
                 char *colon = strchr(line, ':');
                 if (!colon) continue;
                 *colon = '\0';
@@ -91,7 +90,6 @@ static void read_frontmatter(const char *path, FileMeta *meta) {
             }
         }
 
-        /* Accumulate content snippet (skip blank lines) */
         if (past_fm && line[0] != '\0' &&
             slen < (int)sizeof(meta->snippet) - 2) {
             if (slen > 0) meta->snippet[slen++] = ' ';
@@ -121,7 +119,16 @@ static int count_lines(const char *path) {
 static const char *SKIP_FILES[] = { "INDEX.md", "FRONTMATTER-FORMAT.md", NULL };
 static const char *SKIP_DIRS[]  = {
     "node_modules", ".git", "dist", "build", ".cache",
-    "vendor", "target", ".next", "coverage", NULL
+    "vendor", "target", ".next", "coverage",
+    "proc", "sys", "dev", "__pycache__", ".venv", "snap",
+    NULL
+};
+
+/* Absolute path prefixes to skip (macOS system dirs, Linux pseudo-filesystems) */
+static const char *SKIP_ABS[] = {
+    "/System/Volumes",
+    "/private/var/folders",
+    NULL
 };
 
 static int should_skip(const char *name) {
@@ -133,6 +140,16 @@ static int should_skip(const char *name) {
 static int should_skip_dir(const char *name) {
     for (int i = 0; SKIP_DIRS[i]; i++)
         if (strcmp(name, SKIP_DIRS[i]) == 0) return 1;
+    return 0;
+}
+
+static int should_skip_abs(const char *path) {
+    for (int i = 0; SKIP_ABS[i]; i++) {
+        int len = (int)strlen(SKIP_ABS[i]);
+        if (strncmp(path, SKIP_ABS[i], len) == 0 &&
+            (path[len] == '\0' || path[len] == '/'))
+            return 1;
+    }
     return 0;
 }
 
@@ -148,7 +165,7 @@ static int is_binary_file(const char *path) {
 }
 
 static int match_ext(const char *name, const char * const *exts, int ext_count) {
-    if (ext_count == 0) return 1;   /* 0 = accept all file types */
+    if (ext_count == 0) return 1;
     int nlen = (int)strlen(name);
     for (int i = 0; i < ext_count; i++) {
         int elen = (int)strlen(exts[i]);
@@ -161,19 +178,23 @@ static int match_ext(const char *name, const char * const *exts, int ext_count) 
 }
 
 static void scan_recursive(const char *root, const char *rel,
-                            FileMeta *files, int *count, int max,
+                            FileMeta **files_p, int *count, int *cap,
                             const char * const *exts, int ext_count) {
+    if (*count >= META_SCAN_SOFTCAP) return;
+
     char full[META_PATH_LEN];
     if (rel[0])
         snprintf(full, sizeof(full), "%s/%s", root, rel);
     else
         strncpy(full, root, sizeof(full) - 1);
 
+    if (should_skip_abs(full)) return;
+
     DIR *d = opendir(full);
     if (!d) return;
 
     struct dirent *entry;
-    while ((entry = readdir(d)) != NULL && *count < max) {
+    while ((entry = readdir(d)) != NULL && *count < META_SCAN_SOFTCAP) {
         const char *name = entry->d_name;
         if (name[0] == '.') continue;
 
@@ -181,31 +202,46 @@ static void scan_recursive(const char *root, const char *rel,
         snprintf(child, sizeof(child), "%s/%s", full, name);
 
         struct stat st;
-        if (stat(child, &st) != 0) continue;
+        if (lstat(child, &st) != 0) continue;   /* lstat: never follow symlinks */
+
+        if (S_ISLNK(st.st_mode)) continue;       /* skip all symlinks */
 
         if (S_ISDIR(st.st_mode)) {
             if (should_skip_dir(name)) continue;
+            if (should_skip_abs(child)) continue;
             char child_rel[META_SUBDIR_LEN];
             if (rel[0])
                 snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, name);
             else
                 strncpy(child_rel, name, sizeof(child_rel) - 1);
-            scan_recursive(root, child_rel, files, count, max, exts, ext_count);
+            scan_recursive(root, child_rel, files_p, count, cap, exts, ext_count);
 
         } else if (S_ISREG(st.st_mode)) {
             if (!match_ext(name, exts, ext_count)) continue;
             if (should_skip(name)) continue;
 
-            FileMeta *m = &files[*count];
+            /* Grow dynamic array if needed */
+            if (*count >= *cap) {
+                int new_cap = (*cap) * 2;
+                FileMeta *tmp = realloc(*files_p, new_cap * sizeof(FileMeta));
+                if (!tmp) break;
+                *files_p = tmp;
+                *cap     = new_cap;
+            }
+
+            FileMeta *m = &(*files_p)[*count];
             memset(m, 0, sizeof(*m));
             strncpy(m->path,     child, META_PATH_LEN - 1);
             strncpy(m->filename, name,  META_NAME_LEN - 1);
             strncpy(m->title,    name,  META_TITLE_LEN - 1);
             strncpy(m->subdir,   rel,   META_SUBDIR_LEN - 1);
-            m->binary = is_binary_file(child);
-            if (!m->binary) {
-                m->line_count = count_lines(child);
-                read_frontmatter(child, m);
+            m->unreadable = (access(child, R_OK) != 0);
+            if (!m->unreadable) {
+                m->binary = is_binary_file(child);
+                if (!m->binary) {
+                    m->line_count = count_lines(child);
+                    read_frontmatter(child, m);
+                }
             }
             (*count)++;
         }
@@ -220,17 +256,21 @@ static int cmp_subdir_filename(const void *a, const void *b) {
     return c ? c : strcmp(fa->filename, fb->filename);
 }
 
-int scan_dir(const char *dir, FileMeta *files, int max,
-             const char * const *exts, int ext_count) {
+FileMeta *scan_dir(const char *dir, int *count_out,
+                   const char * const *exts, int ext_count) {
     DIR *test = opendir(dir);
-    if (!test) return -1;
+    if (!test) { *count_out = 0; return NULL; }
     closedir(test);
 
-    /* ext_count == 0 means accept all file types (handled in match_ext) */
-    if (!exts) { ext_count = 0; }
+    if (!exts) ext_count = 0;
+
+    int cap = 256;
+    FileMeta *files = calloc(cap, sizeof(FileMeta));
+    if (!files) { *count_out = 0; return NULL; }
 
     int count = 0;
-    scan_recursive(dir, "", files, &count, max, exts, ext_count);
+    scan_recursive(dir, "", &files, &count, &cap, exts, ext_count);
     qsort(files, count, sizeof(FileMeta), cmp_subdir_filename);
-    return count;
+    *count_out = count;
+    return files;
 }
