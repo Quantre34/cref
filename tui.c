@@ -2280,8 +2280,8 @@ static void load_content(App *app, int file_idx) {
         return;
     }
 
-    /* Try bat for syntax-rich rendering */
-    if (load_content_bat_impl(app, file_idx)) {
+    /* bat opt-in: set CREF_USE_BAT=1 to enable (built-in tokenizer is used by default) */
+    if (getenv("CREF_USE_BAT") && load_content_bat_impl(app, file_idx)) {
         app->open_file      = file_idx;
         app->content_offset = 0;
         return;
