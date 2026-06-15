@@ -20,6 +20,7 @@ int levenshtein(const char *a, const char *b) {
     int diff = la - lb;
     if (diff < 0) diff = -diff;
     if (diff > 4) return 99;
+    if (la > 128 || lb > 128) return 99;
 
     int dp[la + 1][lb + 1];
 

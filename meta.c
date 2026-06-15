@@ -74,7 +74,8 @@ static void read_frontmatter(const char *path, FileMeta *meta) {
                     char buf[512];
                     strncpy(buf, open, sizeof(buf) - 1);
                     buf[sizeof(buf) - 1] = '\0';
-                    char *tok = strtok(buf, ",");
+                    char *tag_save = NULL;
+                    char *tok = strtok_r(buf, ",", &tag_save);
                     meta->tag_count = 0;
                     while (tok && meta->tag_count < META_MAX_TAGS) {
                         char *t = trim(tok);
@@ -83,7 +84,7 @@ static void read_frontmatter(const char *path, FileMeta *meta) {
                             strncpy(meta->tags[meta->tag_count], t, META_TAG_LEN - 1);
                             meta->tag_count++;
                         }
-                        tok = strtok(NULL, ",");
+                        tok = strtok_r(NULL, ",", &tag_save);
                     }
                 }
                 continue;

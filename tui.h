@@ -167,8 +167,9 @@ typedef struct {
     char new_file_msg[128]; /* error/status message shown in status bar */
 
     /* Delete confirmation (MODE_CONFIRM_DEL) */
-    int  del_pending_idx;   /* files[] index of file to delete, -1 = none */
-    int  del_prev_mode;     /* mode to return to on cancel */
+    int  del_pending_idx;              /* files[] index at confirm time (-1 = none) */
+    char del_pending_path[META_PATH_LEN]; /* actual path — stable across rescans */
+    int  del_prev_mode;               /* mode to return to on cancel */
 
     /* bat syntax spans (NULL if bat not used / not available) */
     HLSpan **bat_rows;

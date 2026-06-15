@@ -40,13 +40,14 @@ static const char *find_dir(char *buf, int len) {
    buf is a writable scratch buffer (ext pointers point into it). */
 static int parse_filetypes(char *buf, const char **exts, int max_exts) {
     int count = 0;
-    char *tok = strtok(buf, ",");
+    char *save = NULL;
+    char *tok = strtok_r(buf, ",", &save);
     while (tok && count < max_exts) {
         while (*tok == ' ' || *tok == '.') tok++;   /* strip leading dot/space */
         char *end = tok + strlen(tok) - 1;
         while (end > tok && (*end == ' ' || *end == '.')) *end-- = '\0';
         if (*tok) exts[count++] = tok;
-        tok = strtok(NULL, ",");
+        tok = strtok_r(NULL, ",", &save);
     }
     return count;
 }

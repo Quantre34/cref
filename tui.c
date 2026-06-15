@@ -842,8 +842,10 @@ static void draw_status(const App *app) {
             attroff(A_BOLD);
         }
     } else if (app->mode == MODE_CONFIRM_DEL) {
-        const char *fname = (app->del_pending_idx >= 0)
-                          ? app->files[app->del_pending_idx].filename : "?";
+        /* Use stored path/filename — index may be stale after a rescan */
+        const char *fpath = app->del_pending_path[0] ? app->del_pending_path : "?";
+        const char *slash = strrchr(fpath, '/');
+        const char *fname = slash ? slash + 1 : fpath;
         attron(A_BOLD | COLOR_PAIR(CP_EXT_BIN));
         mvprintw(STATUS_Y, 1, " Delete \"%s\"? [y/N]", fname);
         attroff(A_BOLD | COLOR_PAIR(CP_EXT_BIN));
@@ -1357,17 +1359,36 @@ static void hl_render_line(int y, int x, const char *line, int cs, int clen,
     if (pos < ce) mvaddnstr(y, x+(pos-cs), line+pos, ce-pos);
 }
 
+/* Wrap src in single-quotes, escaping embedded ' as '\''.
+   Safe for passing arbitrary paths to POSIX shells via popen(). */
+static void shell_quote(const char *src, char *out, size_t outsz) {
+    size_t i = 0;
+    if (outsz < 3) { if (outsz) out[0] = '\0'; return; }
+    out[i++] = '\'';
+    for (; *src && i < outsz - 4; src++) {
+        if (*src == '\'') {
+            out[i++] = '\''; out[i++] = '\\';
+            out[i++] = '\''; out[i++] = '\'';
+        } else {
+            out[i++] = *src;
+        }
+    }
+    out[i++] = '\'';
+    out[i]   = '\0';
+}
+
 /* Load file via bat, filling content + bat_rows. Returns 1 on success. */
 static int load_content_bat_impl(App *app, int file_idx) {
     const char *bat = bat_find();
     if (!bat) return 0;
 
     const FileMeta *m = &app->files[file_idx];
-    char cmd[META_PATH_LEN + 128];
-    /* single-quote the path; works for all chars except ' in filename */
+    char qpath[META_PATH_LEN * 4 + 4];
+    shell_quote(m->path, qpath, sizeof(qpath));
+    char cmd[META_PATH_LEN * 4 + 128];
     snprintf(cmd, sizeof(cmd),
              "%s --color=always --style=plain --paging=never "
-             "--terminal-width=4096 '%s' 2>/dev/null", bat, m->path);
+             "--terminal-width=4096 %s 2>/dev/null", bat, qpath);
 
     FILE *f = popen(cmd, "r");
     if (!f) return 0;
@@ -1986,7 +2007,7 @@ static void draw_content(const App *app) {
                    app->content.line_count;
         if (pct > 100) pct = 100;
         attron(COLOR_PAIR(CP_TAG) | A_BOLD);
-        mvprintw(PANEL_Y + rph - 1, COLS - 9, " [%3d%%]", pct);
+        mvprintw(PANEL_Y, COLS - 9, " [%3d%%]", pct);
         attroff(COLOR_PAIR(CP_TAG) | A_BOLD);
     }
 
@@ -3485,13 +3506,14 @@ static void start_scan(App *app, int max_depth) {
     sa->ext_count = 0;
     if (app->filter_ext_count > 0) {
         /* Re-parse pointers into our local exts_buf */
-        char *tok = strtok(sa->exts_buf, ",");
+        char *save = NULL;
+        char *tok = strtok_r(sa->exts_buf, ",", &save);
         while (tok && sa->ext_count < 16) {
             while (*tok == ' ' || *tok == '.') tok++;
             char *end = tok + strlen(tok) - 1;
             while (end > tok && (*end == ' ' || *end == '.')) *end-- = '\0';
             if (*tok) sa->exts[sa->ext_count++] = tok;
-            tok = strtok(NULL, ",");
+            tok = strtok_r(NULL, ",", &save);
         }
     }
 
@@ -3557,13 +3579,14 @@ static void start_subdir_scan(App *app, const char *subdir) {
     sa->exts_buf[sizeof(sa->exts_buf) - 1] = '\0';
     sa->ext_count = 0;
     if (app->filter_ext_count > 0) {
-        char *tok = strtok(sa->exts_buf, ",");
+        char *save = NULL;
+        char *tok = strtok_r(sa->exts_buf, ",", &save);
         while (tok && sa->ext_count < 16) {
             while (*tok == ' ' || *tok == '.') tok++;
             char *end = tok + strlen(tok) - 1;
             while (end > tok && (*end == ' ' || *end == '.')) *end-- = '\0';
             if (*tok) sa->exts[sa->ext_count++] = tok;
-            tok = strtok(NULL, ",");
+            tok = strtok_r(NULL, ",", &save);
         }
     }
 
@@ -3617,13 +3640,14 @@ static void apply_filter_and_rescan(App *app) {
     strncpy(app->filter_buf, app->filter_input, sizeof(app->filter_buf) - 1);
     app->filter_buf[sizeof(app->filter_buf) - 1] = '\0';
     app->filter_ext_count = 0;
-    char *tok = strtok(app->filter_buf, ",");
+    char *filter_save = NULL;
+    char *tok = strtok_r(app->filter_buf, ",", &filter_save);
     while (tok && app->filter_ext_count < 16) {
         while (*tok == ' ' || *tok == '.') tok++;
         char *end = tok + strlen(tok) - 1;
         while (end > tok && (*end == ' ' || *end == '.')) *end-- = '\0';
         if (*tok) app->filter_exts[app->filter_ext_count++] = tok;
-        tok = strtok(NULL, ",");
+        tok = strtok_r(NULL, ",", &filter_save);
     }
     rescan(app);
 }
@@ -3729,6 +3753,14 @@ static void handle_new_file(App *app, int key) {
         break;
     case '\n': case '\r': {
         if (app->new_file_len == 0) { app->mode = MODE_LIST; curs_set(0); break; }
+        /* Reject path traversal: no slashes, no ".." component */
+        if (strchr(app->new_file_buf, '/') ||
+            strcmp(app->new_file_buf, "..") == 0 ||
+            strncmp(app->new_file_buf, "../", 3) == 0) {
+            snprintf(app->new_file_msg, sizeof(app->new_file_msg),
+                     "Invalid filename: no path separators allowed");
+            break;
+        }
         const char *sub = new_file_target_subdir(app);
         char full[META_PATH_LEN];
         if (sub[0])
@@ -3762,7 +3794,7 @@ static void handle_new_file(App *app, int key) {
         app->new_file_msg[0] = '\0';
         break;
     default:
-        if (key >= 32 && key < 127 &&
+        if (key >= 32 && key < 127 && key != '/' &&
             app->new_file_len < (int)sizeof(app->new_file_buf) - 2) {
             app->new_file_buf[app->new_file_len++] = (char)key;
             app->new_file_buf[app->new_file_len]   = '\0';
@@ -3774,27 +3806,33 @@ static void handle_new_file(App *app, int key) {
 
 static void enter_confirm_del(App *app, int file_idx, int prev_mode) {
     app->del_pending_idx = file_idx;
-    app->del_prev_mode   = prev_mode;
-    app->mode            = MODE_CONFIRM_DEL;
+    if (file_idx >= 0 && file_idx < app->file_count)
+        strncpy(app->del_pending_path, app->files[file_idx].path, META_PATH_LEN - 1);
+    else
+        app->del_pending_path[0] = '\0';
+    app->del_prev_mode = prev_mode;
+    app->mode          = MODE_CONFIRM_DEL;
 }
 
 static void handle_confirm_del(App *app, int key) {
     if (key == 'y' || key == 'Y') {
-        int idx = app->del_pending_idx;
-        if (idx >= 0 && idx < app->file_count) {
-            unlink(app->files[idx].path);
-            /* Close file if it was open */
-            if (app->open_file == idx) {
+        if (app->del_pending_path[0]) {
+            unlink(app->del_pending_path);
+            /* Close file if its path matches the open file */
+            if (app->open_file >= 0 &&
+                strcmp(app->files[app->open_file].path, app->del_pending_path) == 0) {
                 app->open_file = -1;
                 content_free(&app->content);
                 bat_free(app);
             }
             rescan(app);
         }
-        app->del_pending_idx = -1;
+        app->del_pending_idx  = -1;
+        app->del_pending_path[0] = '\0';
         app->mode = MODE_LIST;
     } else {
-        app->del_pending_idx = -1;
+        app->del_pending_idx  = -1;
+        app->del_pending_path[0] = '\0';
         app->mode = app->del_prev_mode;
     }
 }
@@ -3802,6 +3840,274 @@ static void handle_confirm_del(App *app, int key) {
 /* ---------------------------------------------------------------
    Build helpers
 --------------------------------------------------------------- */
+
+/* Header → linker flag(s) mapping.
+   Each entry maps an #include <hdr> to one or more -l flags.
+   Entries with multiple flags are space-separated. */
+static const struct { const char *hdr; const char *flags; } LIB_MAP[] = {
+    /* Math */
+    {"math.h",                    "-lm"},
+    {"complex.h",                 "-lm"},
+    {"tgmath.h",                  "-lm"},
+    /* Threads / sync */
+    {"pthread.h",                 "-lpthread"},
+    {"semaphore.h",               "-lpthread"},
+    /* Terminal / curses */
+    {"ncurses.h",                 "-lncurses"},
+    {"ncurses/ncurses.h",         "-lncurses"},
+    {"curses.h",                  "-lncurses"},
+    {"term.h",                    "-lncurses"},
+    {"panel.h",                   "-lncurses -lpanel"},
+    {"form.h",                    "-lncurses -lform"},
+    {"menu.h",                    "-lncurses -lmenu"},
+    /* PTY — Linux uses pty.h, macOS uses util.h */
+    {"pty.h",                     "-lutil"},
+    {"util.h",                    "-lutil"},
+    {"libutil.h",                 "-lutil"},
+    /* Dynamic loading */
+    {"dlfcn.h",                   "-ldl"},
+    /* POSIX real-time (clock_gettime, mq_open, aio on older Linux) */
+    {"mqueue.h",                  "-lrt"},
+    {"aio.h",                     "-lrt"},
+    /* Crypto / TLS */
+    {"openssl/ssl.h",             "-lssl -lcrypto"},
+    {"openssl/crypto.h",          "-lcrypto"},
+    {"openssl/md5.h",             "-lcrypto"},
+    {"openssl/sha.h",             "-lcrypto"},
+    {"openssl/sha256.h",          "-lcrypto"},
+    {"openssl/evp.h",             "-lssl -lcrypto"},
+    {"openssl/rsa.h",             "-lcrypto"},
+    {"openssl/aes.h",             "-lcrypto"},
+    {"openssl/err.h",             "-lssl -lcrypto"},
+    {"openssl/rand.h",            "-lcrypto"},
+    {"openssl/hmac.h",            "-lcrypto"},
+    {"openssl/x509.h",            "-lssl -lcrypto"},
+    {"mbedtls/ssl.h",             "-lmbedtls -lmbedx509 -lmbedcrypto"},
+    {"mbedtls/net_sockets.h",     "-lmbedtls -lmbedx509 -lmbedcrypto"},
+    {"mbedtls/entropy.h",         "-lmbedtls -lmbedx509 -lmbedcrypto"},
+    {"gnutls/gnutls.h",           "-lgnutls"},
+    {"sodium.h",                  "-lsodium"},
+    {"gcrypt.h",                  "-lgcrypt"},
+    /* HTTP */
+    {"curl/curl.h",               "-lcurl"},
+    {"microhttpd.h",              "-lmicrohttpd"},
+    /* Event loops / async I/O */
+    {"event.h",                   "-levent"},
+    {"event2/event.h",            "-levent"},
+    {"event2/bufferevent.h",      "-levent"},
+    {"event2/thread.h",           "-levent_pthreads -levent"},
+    {"ev.h",                      "-lev"},
+    {"uv.h",                      "-luv"},
+    /* Databases */
+    {"sqlite3.h",                 "-lsqlite3"},
+    {"mysql/mysql.h",             "-lmysqlclient"},
+    {"libpq-fe.h",                "-lpq"},
+    {"redis/hiredis.h",           "-lhiredis"},
+    {"hiredis/hiredis.h",         "-lhiredis"},
+    {"lmdb.h",                    "-llmdb"},
+    {"leveldb/c.h",               "-lleveldb"},
+    {"rocksdb/c.h",               "-lrocksdb"},
+    /* Compression */
+    {"zlib.h",                    "-lz"},
+    {"bzlib.h",                   "-lbz2"},
+    {"bz2.h",                     "-lbz2"},
+    {"lzma.h",                    "-llzma"},
+    {"lz4.h",                     "-llz4"},
+    {"lz4frame.h",                "-llz4"},
+    {"lz4hc.h",                   "-llz4"},
+    {"zstd.h",                    "-lzstd"},
+    {"snappy-c.h",                "-lsnappy"},
+    {"blosc.h",                   "-lblosc"},
+    /* Data formats */
+    {"json-c/json.h",             "-ljson-c"},
+    {"jansson.h",                 "-ljansson"},
+    {"cjson/cJSON.h",             "-lcjson"},
+    {"cJSON.h",                   "-lcjson"},
+    {"yaml.h",                    "-lyaml"},
+    {"libxml/parser.h",           "-lxml2"},
+    {"libxml/tree.h",             "-lxml2"},
+    {"libxml/xpath.h",            "-lxml2"},
+    {"libxml/xmlreader.h",        "-lxml2"},
+    {"expat.h",                   "-lexpat"},
+    {"msgpack.h",                 "-lmsgpack"},
+    {"cbor.h",                    "-lcbor"},
+    {"toml.h",                    "-ltoml"},
+    /* UUID */
+    {"uuid/uuid.h",               "-luuid"},
+    /* Regex */
+    {"pcre.h",                    "-lpcre"},
+    {"pcre2.h",                   "-lpcre2-8"},
+    /* Readline / editline */
+    {"readline/readline.h",       "-lreadline"},
+    {"readline/history.h",        "-lreadline"},
+    {"editline/readline.h",       "-ledit"},
+    /* SDL */
+    {"SDL.h",                     "-lSDL"},
+    {"SDL/SDL.h",                 "-lSDL"},
+    {"SDL2/SDL.h",                "-lSDL2"},
+    {"SDL2/SDL_image.h",          "-lSDL2_image"},
+    {"SDL2/SDL_mixer.h",          "-lSDL2_mixer"},
+    {"SDL2/SDL_ttf.h",            "-lSDL2_ttf"},
+    {"SDL2/SDL_net.h",            "-lSDL2_net"},
+    {"SDL2/SDL_gfx.h",            "-lSDL2_gfx"},
+    {"SDL3/SDL.h",                "-lSDL3"},
+    /* OpenGL */
+    {"GL/gl.h",                   "-lGL"},
+    {"GL/glu.h",                  "-lGL -lGLU"},
+    {"GL/glut.h",                 "-lGL -lGLU -lglut"},
+    {"GL/glew.h",                 "-lGL -lGLEW"},
+    {"GL/freeglut.h",             "-lGL -lGLU -lglut"},
+    {"GLFW/glfw3.h",              "-lglfw"},
+    {"OpenGL/gl.h",               "-framework OpenGL"},
+    {"OpenGL/glu.h",              "-framework OpenGL"},
+    {"OpenGL/glut.h",             "-framework OpenGL -framework GLUT"},
+    {"GLUT/glut.h",               "-framework OpenGL -framework GLUT"},
+    {"vulkan/vulkan.h",           "-lvulkan"},
+    /* X11 */
+    {"X11/Xlib.h",                "-lX11"},
+    {"X11/Xutil.h",               "-lX11"},
+    {"X11/keysym.h",              "-lX11"},
+    {"X11/extensions/Xrender.h",  "-lX11 -lXrender"},
+    {"X11/Xft/Xft.h",             "-lX11 -lXft"},
+    {"X11/extensions/Xrandr.h",   "-lX11 -lXrandr"},
+    {"xcb/xcb.h",                 "-lxcb"},
+    /* Cairo / Pango */
+    {"cairo/cairo.h",             "-lcairo"},
+    {"cairo.h",                   "-lcairo"},
+    {"cairo/cairo-xlib.h",        "-lcairo -lX11"},
+    {"pango/pango.h",             "-lpango-1.0"},
+    {"pangocairo.h",              "-lpangocairo-1.0 -lpango-1.0 -lcairo"},
+    /* Images */
+    {"png.h",                     "-lpng"},
+    {"jpeglib.h",                 "-ljpeg"},
+    {"tiff.h",                    "-ltiff"},
+    {"webp/decode.h",             "-lwebp"},
+    {"webp/encode.h",             "-lwebp"},
+    {"gif_lib.h",                 "-lgif"},
+    {"MagickWand/MagickWand.h",   "-lMagickWand -lMagickCore"},
+    /* Fonts */
+    {"ft2build.h",                "-lfreetype"},
+    {"freetype/freetype.h",       "-lfreetype"},
+    {"fontconfig/fontconfig.h",   "-lfontconfig"},
+    /* Audio */
+    {"portaudio.h",               "-lportaudio"},
+    {"alsa/asoundlib.h",          "-lasound"},
+    {"sndfile.h",                 "-lsndfile"},
+    {"ao/ao.h",                   "-lao"},
+    {"mpg123.h",                  "-lmpg123"},
+    {"vorbis/codec.h",            "-lvorbis"},
+    {"vorbis/vorbisfile.h",       "-lvorbis -lvorbisfile"},
+    {"opus/opus.h",               "-lopus"},
+    {"FLAC/stream_decoder.h",     "-lFLAC"},
+    {"FLAC/stream_encoder.h",     "-lFLAC"},
+    {"fftw3.h",                   "-lfftw3"},
+    /* Math / scientific */
+    {"gmp.h",                     "-lgmp"},
+    {"mpfr.h",                    "-lgmp -lmpfr"},
+    {"cblas.h",                   "-lblas"},
+    {"lapacke.h",                 "-llapack -lblas"},
+    {"gsl/gsl_math.h",            "-lgsl -lgslcblas -lm"},
+    {"gsl/gsl_rng.h",             "-lgsl -lgslcblas -lm"},
+    /* Filesystem / FUSE */
+    {"fuse/fuse.h",               "-lfuse"},
+    {"fuse3/fuse.h",              "-lfuse3"},
+    /* Scripting */
+    {"lua.h",                     "-llua"},
+    {"lua5.4/lua.h",              "-llua5.4"},
+    {"lua5.3/lua.h",              "-llua5.3"},
+    {"lua5.2/lua.h",              "-llua5.2"},
+    {"lua5.1/lua.h",              "-llua5.1"},
+    {"lauxlib.h",                 "-llua"},
+    {"lualib.h",                  "-llua"},
+    /* Networking extras */
+    {"zmq.h",                     "-lzmq"},
+    {"nanomsg/nn.h",              "-lnanomsg"},
+    {"nng/nng.h",                 "-lnng"},
+    /* Game / multimedia */
+    {"raylib.h",                  "-lraylib"},
+    {"allegro5/allegro.h",        "-lallegro"},
+    {"allegro5/allegro_audio.h",  "-lallegro_audio"},
+    /* Geo / projection */
+    {"proj_api.h",                "-lproj"},
+    {"proj.h",                    "-lproj"},
+    /* LDAP */
+    {"ldap.h",                    "-lldap"},
+    /* Security */
+    {"sys/capability.h",          "-lcap"},
+    {"cap.h",                     "-lcap"},
+    /* GLib */
+    {"glib.h",                    "-lglib-2.0"},
+    {"glib-2.0/glib.h",           "-lglib-2.0"},
+    /* IPC */
+    {"glib-2.0/gio/gio.h",        "-lgio-2.0 -lglib-2.0"},
+};
+#define LIB_MAP_N ((int)(sizeof(LIB_MAP)/sizeof(LIB_MAP[0])))
+
+/* Returns 1 if -lfoo already appears as a whole word inside flags string */
+static int flag_in_str(const char *flags, const char *flag) {
+    int flen = (int)strlen(flag);
+    const char *p = flags;
+    while ((p = strstr(p, flag)) != NULL) {
+        int before = (p == flags) || (p[-1] == ' ');
+        int after  = (p[flen] == '\0') || (p[flen] == ' ');
+        if (before && after) return 1;
+        p++;
+    }
+    return 0;
+}
+
+/* Scan every .c and .h file in app->files for #include <...> headers
+   and append the required -l flags (deduplicated) into out[outsz]. */
+static void collect_libs(App *app, char *out, int outsz) {
+    out[0] = '\0';
+    for (int fi = 0; fi < app->file_count; fi++) {
+        const char *nm  = app->files[fi].filename;
+        const char *dot = strrchr(nm, '.');
+        if (!dot) continue;
+        if (strcmp(dot, ".c") != 0 && strcmp(dot, ".h") != 0) continue;
+        if (app->files[fi].binary || app->files[fi].unreadable) continue;
+
+        FILE *f = fopen(app->files[fi].path, "r");
+        if (!f) continue;
+
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            if (line[0] != '#') continue;
+            const char *p = line + 1;
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "include", 7) != 0) continue;
+            p += 7;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p != '<') continue;
+            p++;
+            char hdr[128]; int hi = 0;
+            while (*p && *p != '>' && hi < (int)sizeof(hdr) - 1) hdr[hi++] = *p++;
+            hdr[hi] = '\0';
+            if (*p != '>') continue;
+
+            for (int mi = 0; mi < LIB_MAP_N; mi++) {
+                if (strcmp(hdr, LIB_MAP[mi].hdr) != 0) continue;
+                char tmp[256];
+                strncpy(tmp, LIB_MAP[mi].flags, sizeof(tmp) - 1);
+                tmp[sizeof(tmp) - 1] = '\0';
+                char *lib_save = NULL;
+                char *tok = strtok_r(tmp, " ", &lib_save);
+                while (tok) {
+                    if (!flag_in_str(out, tok)) {
+                        int olen = (int)strlen(out);
+                        if (olen + (int)strlen(tok) + 2 < outsz) {
+                            if (olen > 0) out[olen++] = ' ';
+                            strcpy(out + olen, tok);
+                        }
+                    }
+                    tok = strtok_r(NULL, " ", &lib_save);
+                }
+                break;
+            }
+        }
+        fclose(f);
+    }
+}
 
 static int run_capture(const char *cmd, Content *out) {
     content_free(out);
@@ -3819,53 +4125,7 @@ static int run_capture(const char *cmd, Content *out) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-static void do_build(App *app) {
-    if (app->content_dirty && app->open_file >= 0)
-        save_file(app);
-
-    app->compile_prev_mode = app->mode;
-
-    char mf[META_PATH_LEN + 16];
-    snprintf(mf, sizeof(mf), "%s/Makefile", app->scan_dir_path);
-    struct stat bst;
-    int has_makefile = (stat(mf, &bst) == 0);
-
-    char cmd[META_PATH_LEN * 2 + 64];
-
-    if (has_makefile) {
-        snprintf(cmd, sizeof(cmd), "make -C \"%s\" 2>&1", app->scan_dir_path);
-    } else if (app->open_file >= 0) {
-        const FileMeta *fm = &app->files[app->open_file];
-        const char *dot = strrchr(fm->filename, '.');
-        if (dot && strcmp(dot, ".c") == 0) {
-            char stem[META_NAME_LEN];
-            strncpy(stem, fm->filename, sizeof(stem) - 1);
-            char *d = strrchr(stem, '.');
-            if (d) *d = '\0';
-            snprintf(cmd, sizeof(cmd),
-                     "gcc -Wall -g \"%s\" -o \"%s/%s\" 2>&1",
-                     fm->path, app->scan_dir_path, stem);
-        } else {
-            content_free(&app->compile_out);
-            content_append_line_raw(&app->compile_out,
-                "No Makefile found. Open a .c file to compile it directly.");
-            app->compile_ok     = 0;
-            app->compile_out_off = 0;
-            snprintf(app->compile_status, sizeof(app->compile_status), "No build target");
-            app->mode = MODE_COMPILE_OUT;
-            return;
-        }
-    } else {
-        content_free(&app->compile_out);
-        content_append_line_raw(&app->compile_out,
-            "No Makefile found and no file is open.");
-        app->compile_ok      = 0;
-        app->compile_out_off = 0;
-        snprintf(app->compile_status, sizeof(app->compile_status), "No build target");
-        app->mode = MODE_COMPILE_OUT;
-        return;
-    }
-
+static void run_build(App *app, const char *cmd) {
     attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
     mvhline(STATUS_Y, 0, ' ', COLS);
     mvprintw(STATUS_Y, 1, " Building...");
@@ -3874,14 +4134,97 @@ static void do_build(App *app) {
 
     int exit_code = run_capture(cmd, &app->compile_out);
     app->compile_ok = (exit_code == 0);
-    if (app->compile_ok)
-        snprintf(app->compile_status, sizeof(app->compile_status), "Build OK");
-    else
-        snprintf(app->compile_status, sizeof(app->compile_status),
-                 "Build failed (exit %d)", exit_code);
-
+    snprintf(app->compile_status, sizeof(app->compile_status),
+             exit_code == 0 ? "Build OK" : "Build failed (exit %d)", exit_code);
     app->mode        = MODE_COMPILE_OUT;
     app->compile_out_off = 0;
+}
+
+static void do_build(App *app) {
+    if (app->content_dirty && app->open_file >= 0)
+        save_file(app);
+    app->compile_prev_mode = app->mode;
+
+    /* 1. Makefile / makefile / GNUmakefile → make */
+    char mf[META_PATH_LEN + 20];
+    struct stat bst;
+    static const char *mk_names[] = { "Makefile", "makefile", "GNUmakefile" };
+    for (int i = 0; i < 3; i++) {
+        snprintf(mf, sizeof(mf), "%s/%s", app->scan_dir_path, mk_names[i]);
+        if (stat(mf, &bst) == 0) {
+            char qdir[META_PATH_LEN * 4 + 4];
+            shell_quote(app->scan_dir_path, qdir, sizeof(qdir));
+            char cmd[META_PATH_LEN * 4 + 32];
+            snprintf(cmd, sizeof(cmd), "make -C %s 2>&1", qdir);
+            run_build(app, cmd);
+            return;
+        }
+    }
+
+    /* 2. No Makefile — collect all .c files + auto-detect libraries */
+    char libs[1024] = "";
+    collect_libs(app, libs, sizeof(libs));
+
+    int   c_count  = 0;
+    size_t files_sz = 16;
+    for (int fi = 0; fi < app->file_count; fi++) {
+        const char *dot = strrchr(app->files[fi].filename, '.');
+        if (dot && strcmp(dot, ".c") == 0 &&
+            !app->files[fi].binary && !app->files[fi].unreadable) {
+            c_count++;
+            files_sz += strlen(app->files[fi].path) * 4 + 8; /* worst-case shell_quote */
+        }
+    }
+
+    if (c_count == 0) {
+        content_free(&app->compile_out);
+        content_append_line_raw(&app->compile_out,
+            "No .c files found and no Makefile present.");
+        app->compile_ok     = 0;
+        app->compile_out_off = 0;
+        snprintf(app->compile_status, sizeof(app->compile_status), "No build target");
+        app->mode = MODE_COMPILE_OUT;
+        return;
+    }
+
+    /* Output binary name = last path component of scan dir */
+    const char *bname = strrchr(app->scan_dir_path, '/');
+    bname = (bname && bname[1]) ? bname + 1 : app->scan_dir_path;
+    if (!bname[0] || strcmp(bname, ".") == 0) bname = "output";
+
+    /* Build shell-quoted file list */
+    char *files_str = malloc(files_sz);
+    if (!files_str) return;
+    files_str[0] = '\0';
+    for (int fi = 0; fi < app->file_count; fi++) {
+        const char *dot = strrchr(app->files[fi].filename, '.');
+        if (!dot || strcmp(dot, ".c") != 0) continue;
+        if (app->files[fi].binary || app->files[fi].unreadable) continue;
+        char qp[META_PATH_LEN * 4 + 4];
+        shell_quote(app->files[fi].path, qp, sizeof(qp));
+        size_t rem = files_sz - strlen(files_str) - 1;
+        strncat(files_str, " ",  rem); rem--;
+        strncat(files_str, qp, files_sz - strlen(files_str) - 1);
+    }
+
+    /* Shell-quoted output path: scan_dir_path/bname */
+    char out_path[META_PATH_LEN * 2];
+    snprintf(out_path, sizeof(out_path), "%s/%s", app->scan_dir_path, bname);
+    char qout[META_PATH_LEN * 8 + 4];
+    shell_quote(out_path, qout, sizeof(qout));
+
+    /* Build gcc command */
+    size_t cmd_sz = files_sz + sizeof(qout) + strlen(libs) + 64;
+    char  *cmd    = malloc(cmd_sz);
+    if (!cmd) { free(files_str); return; }
+    snprintf(cmd, cmd_sz,
+             "gcc -Wall -Wextra -g%s -o %s%s%s 2>&1",
+             files_str, qout,
+             libs[0] ? " " : "", libs);
+    free(files_str);
+
+    run_build(app, cmd);
+    free(cmd);
 }
 
 static void handle_compile_out(App *app, int key) {
@@ -4210,7 +4553,7 @@ static void handle_list(App *app, int key) {
 }
 
 static void handle_content(App *app, int key) {
-    int view_h  = rpanel_h(app) - 3;
+    int view_h  = rpanel_h(app) - 2;
     int max_off = app->content.line_count - view_h;
     if (max_off < 0) max_off = 0;
 
