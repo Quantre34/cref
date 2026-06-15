@@ -3709,15 +3709,17 @@ static void enter_new_file_mode(App *app) {
     app->new_file_len    = 0;
     app->new_file_msg[0] = '\0';
     app->mode = MODE_NEW_FILE;
+    curs_set(1);
 }
 
 static void handle_new_file(App *app, int key) {
     switch (key) {
     case 27: /* Esc — cancel */
         app->mode = MODE_LIST;
+        curs_set(0);
         break;
     case '\n': case '\r': {
-        if (app->new_file_len == 0) { app->mode = MODE_LIST; break; }
+        if (app->new_file_len == 0) { app->mode = MODE_LIST; curs_set(0); break; }
         const char *sub = new_file_target_subdir(app);
         char full[META_PATH_LEN];
         if (sub[0])
@@ -3740,6 +3742,7 @@ static void handle_new_file(App *app, int key) {
             break;
         }
         fclose(f);
+        curs_set(0);
         rescan(app);
         app->mode = MODE_LIST;
         break;
