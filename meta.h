@@ -1,6 +1,10 @@
 #ifndef META_H
 #define META_H
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #define SCAN_BATCH_SIZE    400   /* progress callback interval during scan */
 #define META_MAX_TAGS      24
 #define META_PATH_LEN      512
