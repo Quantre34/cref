@@ -9,8 +9,8 @@ Browse any directory, edit files, grep across codebases — and press `Ctrl+L` t
 
 ## Features
 
-- **File browser** — tree view for any directory, fuzzy search, filetype filter
-- **Editor** — full text editing with undo, selection, clipboard, in-file find
+- **File browser** — tree view for any directory, fuzzy search, filetype filter; mouse wheel / touchpad scroll
+- **Editor** — full text editing with undo, selection, clipboard, in-file find; scroll with mouse wheel
 - **C reference library** — 64 offline markdown files covering the C standard library (`--ref` or `Ctrl+L`)
 - **Embedded terminal** — real PTY shell inside the TUI (`Ctrl+O`)
 - **Grep mode** — search inside file contents across the whole directory
@@ -73,6 +73,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` or `k` / `j` | Navigate |
+| Scroll wheel / touchpad | Scroll list |
 | `Enter` / `→` | Open file |
 | `Esc` / `←` | Back |
 | Type | Fuzzy search |
@@ -89,6 +90,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 ### Editor
 | Key | Action |
 |-----|--------|
+| Scroll wheel / touchpad | Scroll content |
 | `Ctrl+S` | Save |
 | `Ctrl+Z` | Undo |
 | `Ctrl+F` | Find in file |
