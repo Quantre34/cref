@@ -171,6 +171,7 @@ void tui_init(void) {
     raw();
     noecho();
     keypad(stdscr, TRUE);
+    mousemask(ALL_MOUSE_EVENTS, NULL);
     curs_set(0);
     set_escdelay(25);   /* default 1000ms makes ESC key sluggish */
 
@@ -3751,6 +3752,80 @@ static void init_filter_input(App *app) {
    New-file and delete helpers
 --------------------------------------------------------------- */
 
+/* Insert one file into app->files[] (sorted by subdir/filename) and refresh
+   the tree without a full rescan. Falls back to rescan() on alloc failure. */
+static void insert_file_entry(App *app, const char *full_path,
+                              const char *subdir, const char *filename)
+{
+    int new_count = app->file_count + 1;
+    FileMeta *nf = realloc(app->files, new_count * sizeof(FileMeta));
+    if (!nf) { rescan(app); return; }
+    app->files = nf;
+
+    int *nfilt = realloc(app->filtered, new_count * sizeof(int));
+    if (!nfilt) { rescan(app); return; }
+    app->filtered = nfilt;
+
+    FileMeta fm;
+    memset(&fm, 0, sizeof(fm));
+    strncpy(fm.path,     full_path, META_PATH_LEN - 1);
+    strncpy(fm.filename, filename,  META_NAME_LEN - 1);
+    strncpy(fm.subdir,   subdir,    META_SUBDIR_LEN - 1);
+    strncpy(fm.title,    filename,  META_TITLE_LEN - 1);
+    char *dot = strrchr(fm.title, '.');
+    if (dot) *dot = '\0';
+
+    int pos = 0;
+    while (pos < app->file_count) {
+        int c = strcmp(app->files[pos].subdir, subdir);
+        if (c > 0) break;
+        if (c == 0 && strcmp(app->files[pos].filename, filename) >= 0) break;
+        pos++;
+    }
+
+    if (pos < app->file_count)
+        memmove(&app->files[pos + 1], &app->files[pos],
+                (app->file_count - pos) * sizeof(FileMeta));
+    app->files[pos] = fm;
+    app->file_count = new_count;
+
+    if (app->open_file >= pos) app->open_file++;
+
+    update_search(app);
+    build_tree(app);
+
+    for (int i = 0; i < app->tree_view_count; i++) {
+        int vi = app->tree_view[i];
+        if (app->tree_all[vi].kind == NODE_FILE &&
+            app->tree_all[vi].file_idx == pos) {
+            app->tree_sel = i;
+            int view_h = PANEL_H - META_PANEL_H - 1;
+            if (app->tree_sel < app->tree_offset)
+                app->tree_offset = app->tree_sel;
+            if (app->tree_sel >= app->tree_offset + view_h)
+                app->tree_offset = app->tree_sel - view_h + 1;
+            break;
+        }
+    }
+}
+
+/* Remove one file from app->files[] by index and refresh the tree. */
+static void remove_file_entry(App *app, int file_idx)
+{
+    if (file_idx < 0 || file_idx >= app->file_count) return;
+
+    if (file_idx < app->file_count - 1)
+        memmove(&app->files[file_idx], &app->files[file_idx + 1],
+                (app->file_count - file_idx - 1) * sizeof(FileMeta));
+    app->file_count--;
+
+    if (app->open_file > file_idx)
+        app->open_file--;
+
+    update_search(app);
+    build_tree(app);
+}
+
 /* Return the subdir (relative to scan_dir_path) to create a new file in.
    In tree mode: uses the selected node's directory.
    In filtered/search mode: root of scan_dir_path. */
@@ -3811,7 +3886,7 @@ static void handle_new_file(App *app, int key) {
         }
         fclose(f);
         curs_set(0);
-        rescan(app);
+        insert_file_entry(app, full, sub, app->new_file_buf);
         app->mode = MODE_LIST;
         break;
     }
@@ -3844,15 +3919,15 @@ static void enter_confirm_del(App *app, int file_idx, int prev_mode) {
 static void handle_confirm_del(App *app, int key) {
     if (key == 'y' || key == 'Y') {
         if (app->del_pending_path[0]) {
+            int del_idx = app->del_pending_idx;
             unlink(app->del_pending_path);
-            /* Close file if its path matches the open file */
             if (app->open_file >= 0 &&
                 strcmp(app->files[app->open_file].path, app->del_pending_path) == 0) {
                 app->open_file = -1;
                 content_free(&app->content);
                 bat_free(app);
             }
-            rescan(app);
+            remove_file_entry(app, del_idx);
         }
         app->del_pending_idx  = -1;
         app->del_pending_path[0] = '\0';
@@ -4448,6 +4523,32 @@ static void handle_list_tree(App *app, int key) {
         app->quit = 1;
         break;
 
+    case KEY_MOUSE: {
+        MEVENT ev;
+        if (getmouse(&ev) == OK) {
+            if (ev.bstate & BUTTON4_PRESSED) {
+                if (app->tree_sel > 0) {
+                    app->tree_sel--;
+                    if (app->tree_sel < app->tree_offset)
+                        app->tree_offset = app->tree_sel;
+                }
+            } else if (BUTTON_PRESS(ev.bstate, 5)) {
+                if (app->tree_sel < app->tree_view_count - 1) {
+                    app->tree_sel++;
+                    if (app->tree_sel >= app->tree_offset + view_h)
+                        app->tree_offset = app->tree_sel - view_h + 1;
+                }
+            }
+        } else {
+            if (app->tree_sel < app->tree_view_count - 1) {
+                app->tree_sel++;
+                if (app->tree_sel >= app->tree_offset + view_h)
+                    app->tree_offset = app->tree_sel - view_h + 1;
+            }
+        }
+        break;
+    }
+
     default:
         if (key >= 32 && key < 127) {
             app->mode = MODE_SEARCH;
@@ -4552,6 +4653,32 @@ static void handle_list_filtered(App *app, int key) {
     case 'Q':
         app->quit = 1;
         break;
+
+    case KEY_MOUSE: {
+        MEVENT ev;
+        if (getmouse(&ev) == OK) {
+            if (ev.bstate & BUTTON4_PRESSED) {
+                if (app->list_sel > 0) {
+                    app->list_sel--;
+                    if (app->list_sel < app->list_offset)
+                        app->list_offset = app->list_sel;
+                }
+            } else if (BUTTON_PRESS(ev.bstate, 5)) {
+                if (app->list_sel < app->filtered_count - 1) {
+                    app->list_sel++;
+                    if (app->list_sel >= app->list_offset + view_h)
+                        app->list_offset = app->list_sel - view_h + 1;
+                }
+            }
+        } else {
+            if (app->list_sel < app->filtered_count - 1) {
+                app->list_sel++;
+                if (app->list_sel >= app->list_offset + view_h)
+                    app->list_offset = app->list_sel - view_h + 1;
+            }
+        }
+        break;
+    }
 
     default:
         if (key >= 32 && key < 127) {
@@ -4697,6 +4824,20 @@ static void handle_content(App *app, int key) {
     case 'q': case 'Q':
         app->quit = 1;
         break;
+
+    case KEY_MOUSE: {
+        MEVENT ev;
+        if (getmouse(&ev) == OK) {
+            if (ev.bstate & BUTTON4_PRESSED) {
+                if (app->content_offset > 0) app->content_offset--;
+            } else if (BUTTON_PRESS(ev.bstate, 5)) {
+                if (app->content_offset < max_off) app->content_offset++;
+            }
+        } else {
+            if (app->content_offset < max_off) app->content_offset++;
+        }
+        break;
+    }
     }
 }
 
@@ -4980,6 +5121,20 @@ static void handle_edit(App *app, int key) {
         if (app->sel_active) { edit_delete_sel(app); sel_clear(app); }
         for (int i = 0; i < 4; i++) edit_insert_char(app, ' ');
         break;
+
+    case KEY_MOUSE: {
+        MEVENT ev;
+        if (getmouse(&ev) == OK) {
+            if (ev.bstate & BUTTON4_PRESSED) {
+                sel_clear(app); cursor_move_up(app);
+            } else if (BUTTON_PRESS(ev.bstate, 5)) {
+                sel_clear(app); cursor_move_down(app);
+            }
+        } else {
+            sel_clear(app); cursor_move_down(app);
+        }
+        break;
+    }
 
     default:
         if (key >= 32 && key <= 255) {
@@ -5399,6 +5554,19 @@ void tui_run(App *app) {
                 term_resize(app->term, TERM_PANEL_H, new_cols);
             }
             continue;
+        }
+
+        /* Drain mouse events for modes that don't handle scroll.
+           Handlers that DO use getmouse() (list/content/edit) call it themselves. */
+        if (key == KEY_MOUSE) {
+            int handles_scroll = (app->mode == MODE_LIST ||
+                                  app->mode == MODE_CONTENT ||
+                                  app->mode == MODE_EDIT);
+            if (!handles_scroll) {
+                MEVENT ev;
+                getmouse(&ev);
+                continue;
+            }
         }
 
         switch (app->mode) {

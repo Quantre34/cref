@@ -4,3 +4,4 @@ c-ara
 c-search
 *.dSYM/
 .DS_Store
+.claude/
