@@ -2326,8 +2326,26 @@ static void cursor_scroll(App *app) {
     int view_h = rpanel_h(app) - 2;
     if (app->cursor_row < app->content_offset)
         app->content_offset = app->cursor_row;
-    if (app->cursor_row >= app->content_offset + view_h)
-        app->content_offset = app->cursor_row - view_h + 1;
+    /* Scroll down: backward scan from cursor_row to find the minimum
+       content_offset where cursor_row fits within view_h display rows.
+       This accounts for wrapped lines — the simple formula
+       (cursor_row - view_h + 1) can leave cursor off-screen when lines
+       between content_offset and cursor_row consume extra display rows. */
+    {
+        int mw = COLS - (LEFT_W + 1) - 2 - LNUM_W;
+        if (mw < 1) mw = 1;
+        int new_off = app->cursor_row;
+        int disp = 0;
+        for (int i = app->cursor_row; i >= 0; i--) {
+            int llen = (int)strlen(app->content.lines[i]);
+            int nc = (llen == 0) ? 1 : (llen + mw - 1) / mw;
+            disp += nc;
+            if (disp > view_h) { new_off = i + 1; break; }
+            new_off = i;
+        }
+        if (app->content_offset < new_off)
+            app->content_offset = new_off;
+    }
     if (app->content_offset < 0) app->content_offset = 0;
 }
 
@@ -4708,8 +4726,22 @@ static void handle_list(App *app, int key) {
 
 static void handle_content(App *app, int key) {
     int view_h  = rpanel_h(app) - 2;
-    int max_off = app->content.line_count - view_h;
-    if (max_off < 0) max_off = 0;
+    /* Backward scan: find the highest content_offset where the last line of
+       the file is still visible.  The naive (line_count - view_h) formula
+       under-scrolls when lines near the bottom span multiple display rows. */
+    int mw = COLS - (LEFT_W + 1) - 2 - LNUM_W;
+    if (mw < 1) mw = 1;
+    int max_off = 0;
+    {
+        int disp = 0;
+        for (int i = app->content.line_count - 1; i >= 0; i--) {
+            int llen = (int)strlen(app->content.lines[i]);
+            int nc = (llen == 0) ? 1 : (llen + mw - 1) / mw;
+            disp += nc;
+            if (disp > view_h) break;
+            max_off = i;
+        }
+    }
 
     switch (key) {
     case KEY_UP:   case 'k':
