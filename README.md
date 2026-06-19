@@ -16,6 +16,7 @@ Browse any directory, edit files, grep across codebases — and press `Ctrl+L` t
 - **Grep mode** — search inside file contents across the whole directory
 - **Syntax highlighting** — via `bat` if installed, with built-in fallback tokenizer
 - **Build runner** — `Ctrl+B` runs `make` if a Makefile exists, otherwise compiles all `.c` files in the directory with automatic library detection (~130 headers mapped to linker flags)
+- **Encrypted notes** — device-bound encrypted note vault (`Ctrl+Y`); optional per-note password (Argon2id + XSalsa20)
 
 ## Install
 
@@ -79,6 +80,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | Type | Fuzzy search |
 | `Ctrl+T` | Filter by file type (e.g. `c,h`) |
 | `Ctrl+L` | Toggle C reference library |
+| `Ctrl+Y` | Toggle notes panel |
 | `Ctrl+N` | New file |
 | `Ctrl+D` | Delete selected file |
 | `Ctrl+R` | Reload directory |
@@ -87,7 +89,31 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `?` | Help overlay |
 | `q` | Quit |
 
-### Editor
+### Notes Panel (`Ctrl+Y`)
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `k` / `j` | Navigate notes |
+| `→` / `Enter` | Open note (password prompt if locked) |
+| `e` | Edit open note |
+| `Ctrl+Y` | Back to file tree |
+| `Ctrl+N` | New note (optionally password-protected) |
+| `Ctrl+D` | Delete note |
+| `/` | Search in unencrypted notes |
+
+### Note Editor
+| Key | Action |
+|-----|--------|
+| `Esc` | Exit editor, return to notes |
+| `Ctrl+S` | Save |
+| `Ctrl+Z` | Undo |
+| `Ctrl+E` | Set / change / remove note password |
+| `Ctrl+F` | Find in note |
+| `Ctrl+A` | Select all |
+| `Ctrl+C` / `Ctrl+V` | Copy / Paste |
+| `Ctrl+X` | Cut |
+| `Ctrl+D` | Duplicate line |
+
+### File Editor
 | Key | Action |
 |-----|--------|
 | Scroll wheel / touchpad | Scroll content |

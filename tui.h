@@ -2,6 +2,7 @@
 #define TUI_H
 
 #include "meta.h"
+#include "notes.h"
 #include "term.h"
 #include <ncurses.h>
 #include <pthread.h>
@@ -32,7 +33,15 @@ typedef enum {
     MODE_COMPILE_OUT, /* Ctrl+B: build output viewer */
     MODE_HELP,        /* ?: shortcuts overlay */
     MODE_TERM,        /* Ctrl+O: embedded PTY terminal panel */
+    MODE_NOTES,       /* Ctrl+Y: notes tree panel active */
+    MODE_NOTE_PW,     /* password prompt for locked note */
+    MODE_NOTE_NEW,    /* new note title prompt */
+    MODE_NOTE_SEARCH, /* search inside notes */
+    MODE_NOTE_SET_PW, /* Ctrl+E: set/change/remove note password */
 } Mode;
+
+typedef enum { NVIEW_CAT = 0, NVIEW_NOTE = 1 } NViewKind;
+typedef struct { NViewKind kind; int idx; } NViewItem;
 
 typedef struct { int col; int len; short cp; attr_t attr; } HLSpan;
 
@@ -185,6 +194,7 @@ typedef struct {
 
     /* Help overlay (MODE_HELP) */
     int     help_prev_mode;
+    int     help_offset;
 
     /* PTY terminal panel (MODE_TERM / Ctrl+O) */
     Term   *term;
@@ -222,6 +232,51 @@ typedef struct {
 
     /* Currently loading subdir (empty string if none) */
     char             loading_subdir[META_SUBDIR_LEN];
+
+    /* Notes panel (Ctrl+Y) */
+    NoteVault *vault;                   /* heap, NULL until first Ctrl+Y */
+    int        open_note;               /* -1 = no note open */
+    char       note_active_pw[256];     /* pw for currently open note */
+
+    NViewItem  notes_view[NOTE_MAX_NOTES + NOTE_MAX_CATS + 4];
+    int        notes_view_count;
+    int        notes_sel;
+    int        notes_offset;
+
+    /* MODE_NOTE_PW */
+    int        note_pw_idx;             /* note waiting for password */
+    char       note_pw_buf[256];
+    int        note_pw_len;
+    int        note_pw_visible;         /* 1 = show chars (creation) */
+
+    /* MODE_NOTE_NEW */
+    char       note_new_title[NOTE_TITLE_LEN];
+    int        note_new_title_len;
+    int        note_new_cat_sel;        /* category index */
+    int        note_new_step;           /* 0=title, 1=ask pw y/n, 2=pw, 3=confirm */
+    int        note_new_created_idx;    /* vault idx of freshly created note */
+    char       note_new_pw1[256];
+    int        note_new_pw1_len;
+    char       note_new_pw2[256];
+    int        note_new_pw2_len;
+
+    /* MODE_NOTE_SET_PW (Ctrl+E in edit mode) */
+    int        note_setpw_step;         /* 0=current pw, 1=new pw, 2=confirm */
+    char       note_setpw_old[256];
+    int        note_setpw_old_len;
+    char       note_setpw_new1[256];
+    int        note_setpw_new1_len;
+    char       note_setpw_new2[256];
+    int        note_setpw_new2_len;
+    char       note_setpw_msg[128];
+
+    /* MODE_NOTE_SEARCH */
+    char       note_sq[128];
+    int        note_sq_len;
+    NoteHit    note_hits[512];
+    int        note_hit_count;
+    int        note_hit_sel;
+    int        note_hit_offset;
 
     Mode mode;
     int  quit;

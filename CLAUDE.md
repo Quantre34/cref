@@ -49,8 +49,20 @@ Scroll direction (user uses traditional/non-natural scrolling):
 - No git push without explicit instruction.
 - Mouse: scroll only for now. Click-to-position is a future feature.
 
+## Notes feature (implemented)
+- `Ctrl+Y` — toggle notes panel (left side switches from file tree to notes tree)
+- Notes stored in `~/.local/share/cref/notes.vault` (binary, chmod 600)
+- Device key: `~/.config/cref/devkey` (32 bytes) + IOKit serial → BLAKE2b → device_key
+- Layer 2 encryption: optional user password per note (Argon2id + XOR with device_key)
+- Vault format: 44-byte binary header + line-based metadata (titles unencrypted) + per-note ciphertext
+- Notes modes: MODE_NOTES (tree nav), MODE_NOTE_PW (password prompt), MODE_NOTE_NEW (title prompt), MODE_NOTE_SEARCH
+- Note content loads into app->content; save_note() writes back to vault
+- Search (/) in notes panel: searches unencrypted note contents only
+
 ## Future features (backlog)
 - Click-to-position (BUTTON1_CLICKED) in list/content panels
 - Config file (~/.config/cref/config)
 - LSP integration
 - Split pane in tui.c
+- Note todo type toggle (Space to check/uncheck [ ] items)
+- Note password UI (Ctrl+E in edit mode to set/change password)

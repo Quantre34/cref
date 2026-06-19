@@ -231,6 +231,7 @@ int main(int argc, char *argv[]) {
     App *app = calloc(1, sizeof(App));
     if (!app) { fprintf(stderr, "Out of memory\n"); return 1; }
     app->open_file = -1;
+    app->open_note = -1;
     app->mode      = MODE_LIST;
 
     strncpy(app->scan_dir_path, dir,        META_PATH_LEN - 1);

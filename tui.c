@@ -1,6 +1,8 @@
 #include "tui.h"
 #include "search.h"
+#include "notes.h"
 
+#include <sodium.h>
 #include <ncurses.h>
 #include <string.h>
 #include <stdlib.h>
@@ -93,6 +95,12 @@ static void sel_normalize(const App *app, int *r0, int *c0, int *r1, int *c1);
 static void sel_clear(App *app);
 static int  find_in_line_from(const char *line, const char *query, int from_col);
 static const char *new_file_target_subdir(const App *app);
+
+/* Forward declarations for notes helpers */
+static void ensure_vault(App *app);
+static void rebuild_notes_view(App *app);
+static void load_note_content(App *app, int note_idx);
+static int  save_note(App *app);
 
 /* UTF-8 helpers --------------------------------------------------------- */
 
@@ -1202,7 +1210,230 @@ static void draw_list(const App *app) {
 }
 
 /* ---------------------------------------------------------------
-   Vertical divider
+   Notes panel helpers
+--------------------------------------------------------------- */
+
+static void rebuild_notes_view(App *app) {
+    app->notes_view_count = 0;
+    NoteVault *v = app->vault;
+    if (!v) return;
+
+    for (int ci = 0; ci < v->cat_count; ci++) {
+        if (app->notes_view_count >= NOTE_MAX_NOTES + NOTE_MAX_CATS) break;
+        app->notes_view[app->notes_view_count++] = (NViewItem){ NVIEW_CAT, ci };
+        for (int ni = 0; ni < v->note_count; ni++) {
+            if (strcmp(v->notes[ni].cat_id, v->cats[ci].id) != 0) continue;
+            if (app->notes_view_count >= NOTE_MAX_NOTES + NOTE_MAX_CATS) break;
+            app->notes_view[app->notes_view_count++] = (NViewItem){ NVIEW_NOTE, ni };
+        }
+    }
+    /* Notes with no matching category */
+    for (int ni = 0; ni < v->note_count; ni++) {
+        int found = 0;
+        for (int ci = 0; ci < v->cat_count && !found; ci++)
+            if (strcmp(v->notes[ni].cat_id, v->cats[ci].id) == 0) found = 1;
+        if (!found) {
+            if (app->notes_view_count >= NOTE_MAX_NOTES + NOTE_MAX_CATS) break;
+            app->notes_view[app->notes_view_count++] = (NViewItem){ NVIEW_NOTE, ni };
+        }
+    }
+
+    if (app->notes_sel >= app->notes_view_count)
+        app->notes_sel = app->notes_view_count > 0 ? app->notes_view_count - 1 : 0;
+}
+
+/* Mini file list drawn in the bottom half of the left panel when notes are open. */
+static void draw_mini_file_list(const App *app, int start_y, int avail_h) {
+    for (int r = start_y; r < start_y + avail_h; r++)
+        mvhline(r, 0, ' ', LEFT_W);
+
+    attron(A_BOLD | A_DIM);
+    mvprintw(start_y, 1, "%-*s", LEFT_W - 2, "Files");
+    attroff(A_BOLD | A_DIM);
+
+    int list_h = avail_h - 1;
+    int base_y = start_y + 1;
+
+    for (int i = 0; i < list_h && i + app->tree_offset < app->tree_view_count; i++) {
+        int vi           = app->tree_view[i + app->tree_offset];
+        const TreeNode *n = &app->tree_all[vi];
+        int row    = base_y + i;
+        int is_sel = (i + app->tree_offset == app->tree_sel);
+        int is_open = is_sel && (app->open_file >= 0);
+
+        int pair = 0;
+        if      (is_sel && !is_open)  pair = CP_SELECTED;
+        else if (is_open)             pair = CP_MD_HEAD;
+        else if (n->kind == NODE_DIR) pair = CP_DIR;
+        if (pair) attron(COLOR_PAIR(pair) | A_BOLD);
+
+        int avail = LEFT_W - 2 - n->depth * 2 - 1;
+        if (avail < 2) avail = 2;
+        char name[64];
+        strncpy(name, n->name, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+        if ((int)strlen(name) > avail) name[avail] = '\0';
+
+        if (n->kind == NODE_DIR)
+            mvprintw(row, 0, " %*s[%c]%-*s",
+                     n->depth * 2, "", n->expanded ? '-' : '+',
+                     avail - 3 < 1 ? 1 : avail - 3, name);
+        else
+            mvprintw(row, 0, " %*s%-*s",
+                     n->depth * 2, "", avail, name);
+
+        if (pair) attroff(COLOR_PAIR(pair) | A_BOLD);
+    }
+}
+
+static void draw_notes_panel(const App *app) {
+    int notes_h = PANEL_H / 2;   /* rows dedicated to notes (including header+hint) */
+
+    /* Clear notes section */
+    for (int r = PANEL_Y; r < PANEL_Y + notes_h; r++)
+        mvhline(r, 0, ' ', LEFT_W);
+
+    /* Notes header */
+    attron(COLOR_PAIR(CP_HEADER) | A_BOLD);
+    mvprintw(PANEL_Y, 0, " Notes ");
+    attroff(COLOR_PAIR(CP_HEADER) | A_BOLD);
+
+    NoteVault *v = app->vault;
+    int view_h = notes_h - 2;   /* -1 header, -1 hint */
+
+    if (!v || app->notes_view_count == 0) {
+        attron(A_DIM);
+        mvprintw(PANEL_Y + 2, 1, "Ctrl+N ile not oluştur");
+        attroff(A_DIM);
+    } else {
+        int offset = app->notes_offset;
+        for (int vi = offset;
+             vi < app->notes_view_count && vi - offset < view_h; vi++) {
+            int row    = PANEL_Y + 1 + (vi - offset);
+            int is_sel = (vi == app->notes_sel);
+            NViewItem item = app->notes_view[vi];
+
+            if (is_sel) attron(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+
+            if (item.kind == NVIEW_CAT) {
+                NoteCat *c = &v->cats[item.idx];
+                if (!is_sel) attron(COLOR_PAIR(CP_DIR) | A_BOLD);
+                mvprintw(row, 0, "%-*.*s", LEFT_W, LEFT_W, c->name);
+                if (!is_sel) attroff(COLOR_PAIR(CP_DIR) | A_BOLD);
+            } else {
+                Note *n = &v->notes[item.idx];
+                int title_w = LEFT_W - 8;
+                const char *type_tag = (n->type == NOTE_TODO) ? "[todo]" : "[text]";
+                const char *lock = n->has_pw ? "*" : " ";
+                mvprintw(row, 0, " %s%-*.*s%s",
+                         lock, title_w, title_w, n->title, type_tag);
+            }
+
+            if (is_sel) attroff(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+        }
+    }
+
+    /* Notes hint */
+    attron(COLOR_PAIR(CP_SUGGEST));
+    mvprintw(PANEL_Y + notes_h - 1, 0, "^N ^D ^/  ^Y←Files");
+    attroff(COLOR_PAIR(CP_SUGGEST));
+
+    /* Separator */
+    attron(A_DIM);
+    mvhline(PANEL_Y + notes_h, 0, ACS_HLINE, LEFT_W);
+    attroff(A_DIM);
+
+    /* File list in bottom half */
+    draw_mini_file_list(app, PANEL_Y + notes_h + 1, PANEL_H - notes_h - 1);
+}
+
+/* Load note content into app->content (for display/edit).
+   Requires note to already be decrypted (n->content != NULL). */
+static void load_note_content(App *app, int note_idx) {
+    NoteVault *v = app->vault;
+    if (!v || note_idx < 0 || note_idx >= v->note_count) return;
+    Note *n = &v->notes[note_idx];
+    if (!n->content) return;
+
+    content_free(&app->content);
+    bat_free(app);
+
+    /* Split by newlines */
+    const char *src = n->content;
+    int cap = 32;
+    app->content.lines = malloc(cap * sizeof(char *));
+    if (!app->content.lines) return;
+    app->content.line_count = 0;
+    app->content.capacity   = cap;
+
+    const char *p = src;
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        size_t ll = nl ? (size_t)(nl - p) : strlen(p);
+        if (app->content.line_count >= app->content.capacity) {
+            int nc = app->content.capacity * 2;
+            char **nlines = realloc(app->content.lines, nc * sizeof(char *));
+            if (!nlines) break;
+            app->content.lines    = nlines;
+            app->content.capacity = nc;
+        }
+        char *line = malloc(ll + 1);
+        if (!line) break;
+        memcpy(line, p, ll);
+        line[ll] = '\0';
+        app->content.lines[app->content.line_count++] = line;
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    if (app->content.line_count == 0) {
+        /* Empty note: at least one empty line so editor works */
+        app->content.lines[0] = strdup("");
+        app->content.line_count = 1;
+    }
+
+    app->open_note  = note_idx;
+    app->open_file  = -1;
+    app->content_offset = 0;
+    app->content_dirty  = 0;
+}
+
+/* Join app->content back to a single string and encrypt into vault */
+static int save_note(App *app) {
+    if (!app->vault || app->open_note < 0) return 0;
+    NoteVault *v = app->vault;
+    Note *n = &v->notes[app->open_note];
+
+    size_t total = 0;
+    for (int i = 0; i < app->content.line_count; i++)
+        total += strlen(app->content.lines[i]) + 1;
+
+    char *text = malloc(total + 1);
+    if (!text) return 0;
+
+    size_t pos = 0;
+    for (int i = 0; i < app->content.line_count; i++) {
+        size_t ll = strlen(app->content.lines[i]);
+        memcpy(text + pos, app->content.lines[i], ll);
+        pos += ll;
+        if (i < app->content.line_count - 1) text[pos++] = '\n';
+    }
+    text[pos] = '\0';
+
+    if (n->content) {
+        sodium_memzero(n->content, strlen(n->content));
+        free(n->content);
+    }
+    n->content = text;
+
+    const char *pw = app->note_active_pw[0] ? app->note_active_pw : NULL;
+    vault_encrypt_note(v, app->open_note, pw);
+    vault_save(v);
+    app->content_dirty = 0;
+    return 1;
+}
+
+/* Vertical divider
 --------------------------------------------------------------- */
 static int rpanel_h(const App *app) {
     return app->term_panel_open ? PANEL_H - TERM_PANEL_H - 1 : PANEL_H;
@@ -1780,7 +2011,20 @@ static void draw_content(const App *app) {
     for (int r = PANEL_Y; r < PANEL_Y + rph; r++)
         mvhline(r, RIGHT_X, ' ', RIGHT_W);
 
-    if (app->open_file < 0) {
+    if (app->open_file < 0 && app->open_note < 0) {
+        /* In notes mode show a short hint instead of the full index */
+        if (app->mode == MODE_NOTES || app->mode == MODE_NOTE_PW ||
+            app->mode == MODE_NOTE_NEW || app->mode == MODE_NOTE_SEARCH) {
+            int clip = COLS - RIGHT_X - 3;
+            int y = PANEL_Y + 2;
+            attron(A_DIM);
+            mvprintw(y++, RIGHT_X + 2, "%-*s", clip, "  ↑ ↓    not seç");
+            mvprintw(y++, RIGHT_X + 2, "%-*s", clip, "  →      not aç");
+            mvprintw(y++, RIGHT_X + 2, "%-*s", clip, "  Ctrl+N  yeni not");
+            attroff(A_DIM);
+            return;
+        }
+
         const char *msg[] = {
             "",
             "  cref  —  C Reference Browser",
@@ -1792,6 +2036,13 @@ static void draw_content(const App *app) {
             "  • /            : search by tag/title/category",
             "  • [ ]          : jump between sections",
             "  • g / G        : top / bottom of file",
+            "",
+            "  Controls:",
+            "  • Ctrl+Y            : toggle notes panel",
+            "  • Ctrl+B            : build (make / gcc)",
+            "  • Ctrl+O            : toggle terminal panel",
+            "  • Ctrl+L            : toggle CWD ↔ library",
+            "  • Ctrl+T            : filter by file type",
             "",
             "  Editor  (press e to enter, Esc to exit):",
             "  • Ctrl+S            : save",
@@ -1807,9 +2058,8 @@ static void draw_content(const App *app) {
             "  • Ctrl+Shift+←→     : word selection",
             "  • Fn+←→             : line start / end (Mac)",
             "  • Shift+Fn+←→       : select to line start / end",
-            "  • Ctrl+B            : build (make / gcc)",
             "",
-            "  Press ? or F1 at any time to show this help.",
+            "  Press ? or F1 for full help (scrollable).",
             "",
             "  CLI flags:",
             "  • cref <query>           pre-fill search",
@@ -1828,7 +2078,26 @@ static void draw_content(const App *app) {
         return;
     }
 
-    const FileMeta *m = &app->files[app->open_file];
+    const FileMeta *m = (app->open_file >= 0) ? &app->files[app->open_file] : NULL;
+
+    /* Note header (when a note is open instead of a file) */
+    if (app->open_note >= 0 && app->vault) {
+        Note *n = &app->vault->notes[app->open_note];
+        attron(COLOR_PAIR(CP_HEADER) | A_BOLD);
+        mvhline(PANEL_Y, RIGHT_X, ' ', RIGHT_W);
+        {
+            char title_buf[300];
+            snprintf(title_buf, sizeof(title_buf), "%s%s%s%s",
+                n->has_pw ? "* " : "",
+                n->title,
+                app->content_dirty ? " *" : "",
+                app->mode == MODE_EDIT ? "  [EDIT]" : "");
+            mvprintw(PANEL_Y, RIGHT_X + 1, "%-*s", RIGHT_W - 2, title_buf);
+        }
+        attroff(COLOR_PAIR(CP_HEADER) | A_BOLD);
+        mvhline(PANEL_Y + 1, RIGHT_X, ' ', RIGHT_W); /* no tag row for notes */
+        goto draw_lines;
+    }
 
     attron(COLOR_PAIR(CP_HEADER) | A_BOLD);
     mvhline(PANEL_Y, RIGHT_X, ' ', RIGHT_W);
@@ -1856,6 +2125,7 @@ static void draw_content(const App *app) {
         attroff(COLOR_PAIR(CP_TAG));
     }
 
+    draw_lines: ;
     int base_row  = PANEL_Y + 2;
     int view_h    = rph - 2;
     int in_code   = 0;
@@ -1867,7 +2137,7 @@ static void draw_content(const App *app) {
     int mw = max_w < 511 ? max_w : 511;
 
     /* Syntax highlighting state */
-    Lang lang      = detect_lang(file_ext(m->filename));
+    Lang lang      = m ? detect_lang(file_ext(m->filename)) : LANG_NONE;
     int  syn_state = 0;   /* 0=normal, 1=inside multiline comment */
 
     int di = 0;                      /* current display row index */
@@ -2179,6 +2449,111 @@ static void redraw(const App *app) {
         draw_left_meta(app);
         draw_divider();
         draw_compile_out(app);
+    } else if (app->mode == MODE_NOTES || app->mode == MODE_NOTE_PW ||
+               app->mode == MODE_NOTE_NEW || app->mode == MODE_NOTE_SEARCH) {
+        draw_notes_panel(app);
+        draw_divider();
+        draw_content(app);
+        /* Overlay prompts on the right panel */
+        if (app->mode == MODE_NOTE_PW) {
+            int mid = PANEL_Y + PANEL_H / 2;
+            attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            mvhline(mid,     RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 1, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 2, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvprintw(mid,     RIGHT_X + 2, "Note password:");
+            attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            /* Show masked or error hint */
+            int pw_x = RIGHT_X + 2 + 15;
+            for (int i = 0; i < app->note_pw_len; i++)
+                mvaddch(mid + 1, pw_x + i, '*');
+            mvaddch(mid + 1, pw_x + app->note_pw_len, '_');
+            mvprintw(mid + 2, RIGHT_X + 2, "[Enter] unlock  [Esc] cancel");
+        } else if (app->mode == MODE_NOTE_NEW) {
+            int mid = PANEL_Y + PANEL_H / 2;
+            attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            mvhline(mid,     RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 1, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 2, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            if (app->note_new_step == 0) {
+                mvprintw(mid, RIGHT_X + 2, "Yeni not basligi:");
+                attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+                mvprintw(mid + 1, RIGHT_X + 2, "%s", app->note_new_title);
+                mvprintw(mid + 2, RIGHT_X + 2, "[Enter] ileri  [Esc] iptal");
+                move(mid + 1, RIGHT_X + 2 + app->note_new_title_len);
+            } else if (app->note_new_step == 1) {
+                mvprintw(mid, RIGHT_X + 2, "Sifre eklensin mi? [y/n]");
+                attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+                mvprintw(mid + 1, RIGHT_X + 2, "Not: \"%s\"", app->note_new_title);
+                mvprintw(mid + 2, RIGHT_X + 2, "[Esc] iptal");
+            } else if (app->note_new_step == 2) {
+                mvprintw(mid, RIGHT_X + 2, "Yeni sifre:");
+                attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+                for (int i = 0; i < app->note_new_pw1_len; i++)
+                    mvaddch(mid + 1, RIGHT_X + 2 + i, '*');
+                mvaddch(mid + 1, RIGHT_X + 2 + app->note_new_pw1_len, '_');
+                mvprintw(mid + 2, RIGHT_X + 2, "[Enter] ileri  [Esc] iptal");
+                move(mid + 1, RIGHT_X + 2 + app->note_new_pw1_len);
+            } else { /* step 3 */
+                mvprintw(mid, RIGHT_X + 2, "Sifre onay:");
+                attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+                for (int i = 0; i < app->note_new_pw2_len; i++)
+                    mvaddch(mid + 1, RIGHT_X + 2 + i, '*');
+                mvaddch(mid + 1, RIGHT_X + 2 + app->note_new_pw2_len, '_');
+                mvprintw(mid + 2, RIGHT_X + 2, "[Enter] olustur  [Esc] iptal");
+                move(mid + 1, RIGHT_X + 2 + app->note_new_pw2_len);
+            }
+        } else if (app->mode == MODE_NOTE_SEARCH) {
+            /* Search bar at top of right panel, hits below */
+            attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            mvhline(PANEL_Y, RIGHT_X, ' ', RIGHT_W);
+            mvprintw(PANEL_Y, RIGHT_X + 1, " Search notes: %s_", app->note_sq);
+            attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            int row = PANEL_Y + 1;
+            for (int i = app->note_hit_offset;
+                 i < app->note_hit_count && row < PANEL_Y + PANEL_H - 1; i++, row++) {
+                const NoteHit *h = &app->note_hits[i];
+                int is_sel = (i == app->note_hit_sel);
+                if (is_sel) attron(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+                const char *title = app->vault ? app->vault->notes[h->note_idx].title : "";
+                mvprintw(row, RIGHT_X + 1, "%-14.14s  L%-4d  %-*.*s",
+                         title, h->line_no,
+                         RIGHT_W - 26, RIGHT_W - 26, h->line);
+                if (is_sel) attroff(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+            }
+        }
+    } else if ((app->mode == MODE_EDIT || app->mode == MODE_NOTE_SET_PW)
+               && app->open_note >= 0) {
+        draw_notes_panel(app);
+        draw_divider();
+        draw_content(app);
+        /* Overlay for Ctrl+E password change */
+        if (app->mode == MODE_NOTE_SET_PW) {
+            int mid = PANEL_Y + PANEL_H / 2;
+            attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            mvhline(mid,     RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 1, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 2, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 3, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            const char *prompt =
+                app->note_setpw_step == 0 ? "Mevcut sifre:" :
+                app->note_setpw_step == 1 ? "Yeni sifre (bos = kaldir):" :
+                                            "Sifre onay:";
+            mvprintw(mid, RIGHT_X + 2, "%s", prompt);
+            attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            /* masked input */
+            int cur_len = app->note_setpw_step == 0 ? app->note_setpw_old_len
+                        : app->note_setpw_step == 1 ? app->note_setpw_new1_len
+                        :                              app->note_setpw_new2_len;
+            for (int i = 0; i < cur_len; i++)
+                mvaddch(mid + 1, RIGHT_X + 2 + i, '*');
+            mvaddch(mid + 1, RIGHT_X + 2 + cur_len, '_');
+            if (app->note_setpw_msg[0])
+                mvprintw(mid + 2, RIGHT_X + 2, "%s", app->note_setpw_msg);
+            else
+                mvprintw(mid + 2, RIGHT_X + 2, "[Enter] onayla  [Esc] iptal");
+            move(mid + 1, RIGHT_X + 2 + cur_len);
+        }
     } else {
         draw_list(app);
         draw_left_meta(app);
@@ -2194,7 +2569,7 @@ static void redraw(const App *app) {
     if (app->mode == MODE_EDIT_FIND) {
         /* place cursor on the find prompt in the status bar */
         move(STATUS_Y, 8 + app->find_query_len);
-    } else if (app->mode == MODE_EDIT && app->open_file >= 0) {
+    } else if (app->mode == MODE_EDIT && (app->open_file >= 0 || app->open_note >= 0)) {
         int base_row = PANEL_Y + 2;
         int cont_col = RIGHT_X + 1 + LNUM_W;
         int view_h   = rpanel_h(app) - 2;
@@ -4529,11 +4904,22 @@ static void handle_list_tree(App *app, int key) {
 
     case '?':
         app->help_prev_mode = MODE_LIST;
+        app->help_offset = 0;
         app->mode = MODE_HELP;
         break;
 
     case 15: /* Ctrl+O — toggle command panel */
         toggle_term(app);
+        break;
+
+    case 25: /* Ctrl+Y — toggle notes panel */
+        ensure_vault(app);
+        if (app->vault) {
+            app->notes_sel    = 0;
+            app->notes_offset = 0;
+            rebuild_notes_view(app);
+            app->mode = MODE_NOTES;
+        }
         break;
 
     case 'q':
@@ -4662,8 +5048,19 @@ static void handle_list_filtered(App *app, int key) {
         toggle_term(app);
         break;
 
+    case 25: /* Ctrl+Y — toggle notes panel */
+        ensure_vault(app);
+        if (app->vault) {
+            app->notes_sel    = 0;
+            app->notes_offset = 0;
+            rebuild_notes_view(app);
+            app->mode = MODE_NOTES;
+        }
+        break;
+
     case '?':
         app->help_prev_mode = MODE_LIST;
+        app->help_offset = 0;
         app->mode = MODE_HELP;
         break;
 
@@ -4722,6 +5119,594 @@ static void handle_list(App *app, int key) {
         handle_list_tree(app, key);
     else
         handle_list_filtered(app, key);
+}
+
+/* ---------------------------------------------------------------
+   Notes panel key handler
+--------------------------------------------------------------- */
+
+/* Wipe decrypted content of all password-protected notes from memory.
+   Called when leaving the notes panel so the next visit requires re-auth. */
+static void vault_lock_pw_notes(App *app) {
+    NoteVault *v = app->vault;
+    if (!v) return;
+    for (int i = 0; i < v->note_count; i++) {
+        Note *n = &v->notes[i];
+        if (n->has_pw && n->content) {
+            sodium_memzero(n->content, strlen(n->content));
+            free(n->content);
+            n->content = NULL;
+        }
+    }
+    /* If the open note was password-protected, close it */
+    if (app->open_note >= 0 && v->notes[app->open_note].has_pw) {
+        content_free(&app->content);
+        app->open_note = -1;
+        app->note_active_pw[0] = '\0';
+    }
+}
+
+static void ensure_vault(App *app) {
+    if (app->vault) return;
+    app->vault = calloc(1, sizeof(NoteVault));
+    if (!app->vault) return;
+    app->open_note = -1;
+    vault_open(app->vault);
+    rebuild_notes_view(app);
+}
+
+static void handle_notes(App *app, int key) {
+    int view_h = PANEL_H / 2 - 2;
+    NoteVault *v = app->vault;
+    int nc = app->notes_view_count;
+
+    switch (key) {
+    case KEY_UP: case 'k':
+        if (app->notes_sel > 0) {
+            app->notes_sel--;
+            if (app->notes_sel < app->notes_offset)
+                app->notes_offset = app->notes_sel;
+        }
+        break;
+
+    case KEY_DOWN: case 'j':
+        if (app->notes_sel < nc - 1) {
+            app->notes_sel++;
+            if (app->notes_sel >= app->notes_offset + view_h)
+                app->notes_offset = app->notes_sel - view_h + 1;
+        }
+        break;
+
+    case KEY_RIGHT: case '\n': case '\r': {
+        if (!v || nc == 0) break;
+        NViewItem item = app->notes_view[app->notes_sel];
+        if (item.kind == NVIEW_CAT) break;
+        int ni = item.idx;
+        Note *n = &v->notes[ni];
+
+        if (n->has_pw && !n->content) {
+            /* Ask for password */
+            app->note_pw_idx     = ni;
+            app->note_pw_buf[0]  = '\0';
+            app->note_pw_len     = 0;
+            app->note_pw_visible = 0;
+            app->mode            = MODE_NOTE_PW;
+            curs_set(1);
+        } else {
+            load_note_content(app, ni);
+            app->note_active_pw[0] = '\0';
+            app->mode = MODE_NOTES;
+        }
+        break;
+    }
+
+    case 'e': /* enter edit mode for open note */
+        if (app->open_note >= 0) {
+            app->cursor_row = app->content.line_count > 0
+                              ? app->content.line_count - 1 : 0;
+            app->cursor_col = 0;
+            sel_clear(app);
+            app->mode = MODE_EDIT;
+            curs_set(1);
+        }
+        break;
+
+    case 25: /* Ctrl+Y — toggle back to file tree */
+        vault_lock_pw_notes(app);
+        app->mode = MODE_LIST;
+        break;
+
+    case 14: { /* Ctrl+N — new note */
+        if (!v) break;
+        app->note_new_title[0]  = '\0';
+        app->note_new_title_len = 0;
+        app->note_new_cat_sel   = 0;
+        app->mode = MODE_NOTE_NEW;
+        curs_set(1);
+        break;
+    }
+
+    case 4: { /* Ctrl+D — delete selected note */
+        if (!v || nc == 0) break;
+        NViewItem item = app->notes_view[app->notes_sel];
+        if (item.kind != NVIEW_NOTE) break;
+        vault_delete_note(v, item.idx);
+        vault_save(v);
+        if (app->open_note == item.idx) app->open_note = -1;
+        else if (app->open_note > item.idx) app->open_note--;
+        rebuild_notes_view(app);
+        if (app->notes_sel >= app->notes_view_count && app->notes_sel > 0)
+            app->notes_sel--;
+        break;
+    }
+
+    case '/': case 6: /* Ctrl+F */
+        app->note_sq[0]     = '\0';
+        app->note_sq_len    = 0;
+        app->note_hit_count = 0;
+        app->note_hit_sel   = 0;
+        app->note_hit_offset = 0;
+        app->mode = MODE_NOTE_SEARCH;
+        curs_set(1);
+        break;
+
+    case 'q': case 'Q':
+        app->quit = 1;
+        break;
+
+    case '?':
+        app->help_prev_mode = MODE_NOTES;
+        app->help_offset = 0;
+        app->mode = MODE_HELP;
+        break;
+
+    case KEY_MOUSE: {
+        MEVENT ev;
+        if (getmouse(&ev) == OK) {
+            if (ev.bstate & BUTTON4_PRESSED) {
+                if (app->notes_sel > 0) {
+                    app->notes_sel--;
+                    if (app->notes_sel < app->notes_offset)
+                        app->notes_offset = app->notes_sel;
+                }
+            } else if (BUTTON_PRESS(ev.bstate, 5)) {
+                if (app->notes_sel < nc - 1) {
+                    app->notes_sel++;
+                    if (app->notes_sel >= app->notes_offset + view_h)
+                        app->notes_offset = app->notes_sel - view_h + 1;
+                }
+            }
+        } else {
+            if (app->notes_sel < nc - 1) {
+                app->notes_sel++;
+                if (app->notes_sel >= app->notes_offset + view_h)
+                    app->notes_offset = app->notes_sel - view_h + 1;
+            }
+        }
+        break;
+    }
+
+    default: break;
+    }
+}
+
+/* ---------------------------------------------------------------
+   Password prompt for locked notes
+--------------------------------------------------------------- */
+static void handle_note_pw(App *app, int key) {
+    switch (key) {
+    case '\n': case '\r': {
+        /* Try decryption */
+        int rc = vault_decrypt_note(app->vault, app->note_pw_idx,
+                                    app->note_pw_buf);
+        if (rc == 0) {
+            strncpy(app->note_active_pw, app->note_pw_buf,
+                    sizeof(app->note_active_pw) - 1);
+            sodium_memzero(app->note_pw_buf, sizeof(app->note_pw_buf));
+            app->note_pw_len = 0;
+            load_note_content(app, app->note_pw_idx);
+            app->mode = MODE_NOTES;
+            curs_set(0);
+        } else {
+            /* Wrong password: clear and let user retry */
+            sodium_memzero(app->note_pw_buf, sizeof(app->note_pw_buf));
+            app->note_pw_len = 0;
+        }
+        break;
+    }
+
+    case 27: /* Esc — cancel */
+        sodium_memzero(app->note_pw_buf, sizeof(app->note_pw_buf));
+        app->note_pw_len = 0;
+        app->mode = MODE_NOTES;
+        curs_set(0);
+        break;
+
+    case KEY_BACKSPACE: case 127: case '\b':
+        if (app->note_pw_len > 0) {
+            app->note_pw_buf[--app->note_pw_len] = '\0';
+        }
+        break;
+
+    default:
+        if (key >= 32 && key < 127 &&
+            app->note_pw_len < (int)sizeof(app->note_pw_buf) - 2) {
+            app->note_pw_buf[app->note_pw_len++] = (char)key;
+            app->note_pw_buf[app->note_pw_len]   = '\0';
+        }
+        break;
+    }
+}
+
+/* ---------------------------------------------------------------
+   New note title prompt
+--------------------------------------------------------------- */
+/* Select + open a note in notes panel */
+static void note_select_and_open(App *app, int idx) {
+    rebuild_notes_view(app);
+    for (int i = 0; i < app->notes_view_count; i++) {
+        if (app->notes_view[i].kind == NVIEW_NOTE &&
+            app->notes_view[i].idx == idx) {
+            app->notes_sel = i;
+            break;
+        }
+    }
+    load_note_content(app, idx);
+    app->cursor_row = 0;
+    app->cursor_col = 0;
+    sel_clear(app);
+    app->mode = MODE_NOTES;
+    curs_set(0);
+}
+
+static void handle_note_new(App *app, int key) {
+    NoteVault *v = app->vault;
+    if (!v) { app->mode = MODE_NOTES; return; }
+
+    /* --- step 0: title input --- */
+    if (app->note_new_step == 0) {
+        switch (key) {
+        case '\n': case '\r':
+            if (app->note_new_title_len == 0) {
+                app->mode = MODE_NOTES;
+                curs_set(0);
+                break;
+            }
+            /* Title entered → ask about password */
+            app->note_new_step = 1;
+            break;
+        case 27:
+            app->note_new_title[0] = '\0';
+            app->note_new_title_len = 0;
+            app->note_new_step = 0;
+            app->mode = MODE_NOTES;
+            curs_set(0);
+            break;
+        case KEY_BACKSPACE: case 127: case '\b':
+            if (app->note_new_title_len > 0)
+                app->note_new_title[--app->note_new_title_len] = '\0';
+            break;
+        default:
+            if (key >= 32 && key < 127 &&
+                app->note_new_title_len < NOTE_TITLE_LEN - 2) {
+                app->note_new_title[app->note_new_title_len++] = (char)key;
+                app->note_new_title[app->note_new_title_len]   = '\0';
+            }
+            break;
+        }
+        return;
+    }
+
+    /* --- step 1: "Add password? [y/n]" --- */
+    if (app->note_new_step == 1) {
+        if (key == 'y' || key == 'Y') {
+            app->note_new_pw1[0] = '\0'; app->note_new_pw1_len = 0;
+            app->note_new_pw2[0] = '\0'; app->note_new_pw2_len = 0;
+            app->note_new_step = 2;
+        } else if (key == 'n' || key == 'N' || key == '\n' || key == '\r') {
+            /* No password — create without password */
+            const char *cat_id = (v->cat_count > 0 && app->note_new_cat_sel < v->cat_count)
+                                 ? v->cats[app->note_new_cat_sel].id : "";
+            int idx = vault_add_note(v, cat_id, app->note_new_title, NOTE_TEXT);
+            app->note_new_step = 0;
+            if (idx >= 0) {
+                vault_encrypt_note(v, idx, NULL);
+                vault_save(v);
+                app->note_active_pw[0] = '\0';
+                note_select_and_open(app, idx);
+            } else {
+                app->mode = MODE_NOTES; curs_set(0);
+            }
+        } else if (key == 27) {
+            app->note_new_step = 0;
+            app->note_new_title[0] = '\0'; app->note_new_title_len = 0;
+            app->mode = MODE_NOTES; curs_set(0);
+        }
+        return;
+    }
+
+    /* --- step 2: enter password (first) --- */
+    if (app->note_new_step == 2) {
+        switch (key) {
+        case '\n': case '\r':
+            if (app->note_new_pw1_len == 0) {
+                /* Blank → back to y/n */
+                app->note_new_step = 1;
+            } else {
+                app->note_new_step = 3;
+            }
+            break;
+        case 27:
+            app->note_new_step = 0;
+            app->note_new_title[0] = '\0'; app->note_new_title_len = 0;
+            sodium_memzero(app->note_new_pw1, sizeof(app->note_new_pw1));
+            app->note_new_pw1_len = 0;
+            app->mode = MODE_NOTES; curs_set(0);
+            break;
+        case KEY_BACKSPACE: case 127: case '\b':
+            if (app->note_new_pw1_len > 0)
+                app->note_new_pw1[--app->note_new_pw1_len] = '\0';
+            break;
+        default:
+            if (key >= 32 && key < 127 && app->note_new_pw1_len < 254) {
+                app->note_new_pw1[app->note_new_pw1_len++] = (char)key;
+                app->note_new_pw1[app->note_new_pw1_len]   = '\0';
+            }
+            break;
+        }
+        return;
+    }
+
+    /* --- step 3: confirm password --- */
+    if (app->note_new_step == 3) {
+        switch (key) {
+        case '\n': case '\r': {
+            if (strcmp(app->note_new_pw1, app->note_new_pw2) != 0) {
+                /* mismatch → back to step 2 */
+                sodium_memzero(app->note_new_pw1, sizeof(app->note_new_pw1));
+                app->note_new_pw1_len = 0;
+                sodium_memzero(app->note_new_pw2, sizeof(app->note_new_pw2));
+                app->note_new_pw2_len = 0;
+                app->note_new_step = 2;
+                break;
+            }
+            const char *cat_id = (v->cat_count > 0 && app->note_new_cat_sel < v->cat_count)
+                                 ? v->cats[app->note_new_cat_sel].id : "";
+            int idx = vault_add_note(v, cat_id, app->note_new_title, NOTE_TEXT);
+            if (idx >= 0) {
+                vault_encrypt_note(v, idx, app->note_new_pw1);
+                vault_save(v);
+                strncpy(app->note_active_pw, app->note_new_pw1,
+                        sizeof(app->note_active_pw) - 1);
+            }
+            sodium_memzero(app->note_new_pw1, sizeof(app->note_new_pw1));
+            app->note_new_pw1_len = 0;
+            sodium_memzero(app->note_new_pw2, sizeof(app->note_new_pw2));
+            app->note_new_pw2_len = 0;
+            app->note_new_step = 0;
+            if (idx >= 0) {
+                note_select_and_open(app, idx);
+            } else {
+                app->mode = MODE_NOTES; curs_set(0);
+            }
+            break;
+        }
+        case 27:
+            app->note_new_step = 0;
+            app->note_new_title[0] = '\0'; app->note_new_title_len = 0;
+            sodium_memzero(app->note_new_pw1, sizeof(app->note_new_pw1));
+            app->note_new_pw1_len = 0;
+            sodium_memzero(app->note_new_pw2, sizeof(app->note_new_pw2));
+            app->note_new_pw2_len = 0;
+            app->mode = MODE_NOTES; curs_set(0);
+            break;
+        case KEY_BACKSPACE: case 127: case '\b':
+            if (app->note_new_pw2_len > 0)
+                app->note_new_pw2[--app->note_new_pw2_len] = '\0';
+            break;
+        default:
+            if (key >= 32 && key < 127 && app->note_new_pw2_len < 254) {
+                app->note_new_pw2[app->note_new_pw2_len++] = (char)key;
+                app->note_new_pw2[app->note_new_pw2_len]   = '\0';
+            }
+            break;
+        }
+        return;
+    }
+}
+
+/* ---------------------------------------------------------------
+   Note password change handler (Ctrl+E in edit mode)
+   step 0 = enter current password (only when note has_pw)
+   step 1 = enter new password (blank → remove password)
+   step 2 = confirm new password
+--------------------------------------------------------------- */
+static void handle_note_set_pw(App *app, int key)
+{
+    NoteVault *v = app->vault;
+    if (!v || app->open_note < 0) { app->mode = MODE_EDIT; curs_set(1); return; }
+    Note *n = &v->notes[app->open_note];
+
+    /* helpers: active buf / len based on step */
+    char *buf  = app->note_setpw_step == 0 ? app->note_setpw_old
+               : app->note_setpw_step == 1 ? app->note_setpw_new1
+               :                              app->note_setpw_new2;
+    int  *blen = app->note_setpw_step == 0 ? &app->note_setpw_old_len
+               : app->note_setpw_step == 1 ? &app->note_setpw_new1_len
+               :                              &app->note_setpw_new2_len;
+
+    switch (key) {
+    case '\n': case '\r':
+        if (app->note_setpw_step == 0) {
+            /* verify current password against the one used to decrypt */
+            if (strcmp(app->note_setpw_old, app->note_active_pw) != 0) {
+                sodium_memzero(app->note_setpw_old, sizeof(app->note_setpw_old));
+                app->note_setpw_old_len = 0;
+                snprintf(app->note_setpw_msg, sizeof(app->note_setpw_msg),
+                         "Yanlis sifre, tekrar dene");
+            } else {
+                sodium_memzero(app->note_setpw_old, sizeof(app->note_setpw_old));
+                app->note_setpw_old_len = 0;
+                app->note_setpw_msg[0] = '\0';
+                app->note_setpw_step = 1;
+            }
+        } else if (app->note_setpw_step == 1) {
+            if (app->note_setpw_new1_len == 0) {
+                /* blank = remove password */
+                /* sync editor content to n->content first */
+                size_t total = 0;
+                for (int i = 0; i < app->content.line_count; i++)
+                    total += strlen(app->content.lines[i]) + 1;
+                char *text = malloc(total + 1);
+                if (text) {
+                    size_t pos = 0;
+                    for (int i = 0; i < app->content.line_count; i++) {
+                        size_t ll = strlen(app->content.lines[i]);
+                        memcpy(text + pos, app->content.lines[i], ll);
+                        pos += ll;
+                        if (i < app->content.line_count - 1) text[pos++] = '\n';
+                    }
+                    text[pos] = '\0';
+                    if (n->content) { sodium_memzero(n->content, strlen(n->content)); free(n->content); }
+                    n->content = text;
+                }
+                vault_clear_note_pw(v, app->open_note);
+                vault_save(v);
+                app->note_active_pw[0] = '\0';
+                app->content_dirty = 0;
+                rebuild_notes_view(app);
+                app->mode = MODE_EDIT;
+                curs_set(1);
+            } else {
+                app->note_setpw_msg[0] = '\0';
+                app->note_setpw_step = 2;
+            }
+        } else { /* step 2: confirm */
+            if (strcmp(app->note_setpw_new1, app->note_setpw_new2) != 0) {
+                sodium_memzero(app->note_setpw_new1, sizeof(app->note_setpw_new1));
+                app->note_setpw_new1_len = 0;
+                sodium_memzero(app->note_setpw_new2, sizeof(app->note_setpw_new2));
+                app->note_setpw_new2_len = 0;
+                app->note_setpw_step = 1;
+                snprintf(app->note_setpw_msg, sizeof(app->note_setpw_msg),
+                         "Sifreler eslesmiyor, tekrar gir");
+            } else {
+                /* sync editor content to n->content */
+                size_t total = 0;
+                for (int i = 0; i < app->content.line_count; i++)
+                    total += strlen(app->content.lines[i]) + 1;
+                char *text = malloc(total + 1);
+                if (text) {
+                    size_t pos = 0;
+                    for (int i = 0; i < app->content.line_count; i++) {
+                        size_t ll = strlen(app->content.lines[i]);
+                        memcpy(text + pos, app->content.lines[i], ll);
+                        pos += ll;
+                        if (i < app->content.line_count - 1) text[pos++] = '\n';
+                    }
+                    text[pos] = '\0';
+                    if (n->content) { sodium_memzero(n->content, strlen(n->content)); free(n->content); }
+                    n->content = text;
+                }
+                n->has_pw = 1;
+                vault_encrypt_note(v, app->open_note, app->note_setpw_new1);
+                vault_save(v);
+                strncpy(app->note_active_pw, app->note_setpw_new1,
+                        sizeof(app->note_active_pw) - 1);
+                sodium_memzero(app->note_setpw_new1, sizeof(app->note_setpw_new1));
+                app->note_setpw_new1_len = 0;
+                sodium_memzero(app->note_setpw_new2, sizeof(app->note_setpw_new2));
+                app->note_setpw_new2_len = 0;
+                app->content_dirty = 0;
+                rebuild_notes_view(app);
+                app->mode = MODE_EDIT;
+                curs_set(1);
+            }
+        }
+        break;
+
+    case 27: /* Esc — cancel */
+        sodium_memzero(app->note_setpw_old,  sizeof(app->note_setpw_old));
+        app->note_setpw_old_len = 0;
+        sodium_memzero(app->note_setpw_new1, sizeof(app->note_setpw_new1));
+        app->note_setpw_new1_len = 0;
+        sodium_memzero(app->note_setpw_new2, sizeof(app->note_setpw_new2));
+        app->note_setpw_new2_len = 0;
+        app->note_setpw_msg[0] = '\0';
+        app->mode = MODE_EDIT;
+        curs_set(1);
+        break;
+
+    case KEY_BACKSPACE: case 127: case '\b':
+        if (*blen > 0) buf[--(*blen)] = '\0';
+        break;
+
+    default:
+        if (key >= 32 && key < 127 && *blen < 254) {
+            buf[(*blen)++] = (char)key;
+            buf[*blen] = '\0';
+        }
+        break;
+    }
+    (void)n; /* used above */
+}
+
+/* ---------------------------------------------------------------
+   Notes search handler
+--------------------------------------------------------------- */
+static void handle_note_search(App *app, int key) {
+    NoteVault *v = app->vault;
+
+    switch (key) {
+    case 27: /* Esc — back to notes */
+        app->mode = MODE_NOTES;
+        curs_set(0);
+        break;
+
+    case KEY_UP: case 'k':
+        if (app->note_hit_sel > 0) app->note_hit_sel--;
+        break;
+
+    case KEY_DOWN: case 'j':
+        if (app->note_hit_sel < app->note_hit_count - 1) app->note_hit_sel++;
+        break;
+
+    case '\n': case '\r': {
+        if (app->note_hit_count == 0 || !v) break;
+        NoteHit *h = &app->note_hits[app->note_hit_sel];
+        if (!v->notes[h->note_idx].content) break;
+        load_note_content(app, h->note_idx);
+        /* Scroll to matching line */
+        app->content_offset = h->line_no > 1 ? h->line_no - 2 : 0;
+        app->mode = MODE_CONTENT;
+        curs_set(0);
+        break;
+    }
+
+    case KEY_BACKSPACE: case 127: case '\b':
+        if (app->note_sq_len > 0) {
+            app->note_sq[--app->note_sq_len] = '\0';
+            if (v && app->note_sq_len > 0)
+                app->note_hit_count = vault_search(v, app->note_sq,
+                                                   app->note_hits, 512);
+            else
+                app->note_hit_count = 0;
+            app->note_hit_sel = 0;
+        }
+        break;
+
+    default:
+        if (key >= 32 && key < 127 &&
+            app->note_sq_len < (int)sizeof(app->note_sq) - 2) {
+            app->note_sq[app->note_sq_len++] = (char)key;
+            app->note_sq[app->note_sq_len]   = '\0';
+            if (v)
+                app->note_hit_count = vault_search(v, app->note_sq,
+                                                   app->note_hits, 512);
+            app->note_hit_sel = 0;
+        }
+        break;
+    }
 }
 
 static void handle_content(App *app, int key) {
@@ -4850,6 +5835,7 @@ static void handle_content(App *app, int key) {
 
     case '?':
         app->help_prev_mode = MODE_CONTENT;
+        app->help_offset = 0;
         app->mode = MODE_HELP;
         break;
 
@@ -4899,13 +5885,17 @@ static void handle_edit(App *app, int key) {
         }
         nodelay(stdscr, FALSE);
         sel_clear(app);
-        app->mode = MODE_CONTENT;
+        app->mode = (app->open_note >= 0) ? MODE_NOTES : MODE_CONTENT;
         curs_set(0);
     } break;
 
     /* Save */
     case 's' & 0x1F:
-        if (save_file(app)) app->save_flash = 3;
+        if (app->open_note >= 0) {
+            if (save_note(app)) app->save_flash = 3;
+        } else {
+            if (save_file(app)) app->save_flash = 3;
+        }
         break;
 
     /* Reload file from disk (discards unsaved changes) */
@@ -4935,6 +5925,7 @@ static void handle_edit(App *app, int key) {
     /* Help */
     case KEY_F(1):
         app->help_prev_mode = MODE_EDIT;
+        app->help_offset = 0;
         app->mode = MODE_HELP;
         curs_set(0);
         break;
@@ -4986,6 +5977,7 @@ static void handle_edit(App *app, int key) {
     case 'd' & 0x1F:
         edit_duplicate_line(app);
         break;
+
 
     /* Ctrl+K — delete current line */
     case 'k' & 0x1F:
@@ -5079,8 +6071,25 @@ static void handle_edit(App *app, int key) {
         }
         break;
     case KEY_END:
-    case KEY_LINE_END:
         sel_clear(app); app->cursor_col = cur_len;
+        break;
+    case KEY_LINE_END:
+        /* Ctrl+E: if editing a note → open password change flow */
+        if (app->open_note >= 0) {
+            NoteVault *nv = app->vault;
+            int has = nv ? nv->notes[app->open_note].has_pw : 0;
+            app->note_setpw_step = has ? 0 : 1;
+            memset(app->note_setpw_old,  0, sizeof(app->note_setpw_old));
+            app->note_setpw_old_len  = 0;
+            memset(app->note_setpw_new1, 0, sizeof(app->note_setpw_new1));
+            app->note_setpw_new1_len = 0;
+            memset(app->note_setpw_new2, 0, sizeof(app->note_setpw_new2));
+            app->note_setpw_new2_len = 0;
+            app->note_setpw_msg[0]   = '\0';
+            app->mode = MODE_NOTE_SET_PW;
+        } else {
+            sel_clear(app); app->cursor_col = cur_len;
+        }
         break;
 
     /* Page Up / Page Down */
@@ -5463,13 +6472,28 @@ static const char *help_lines[] = {
     "  q / Q          quit",
     "",
     "  In-app controls:",
-    "  Ctrl+N         new file",
-    "  Ctrl+D         delete selected file",
+    "  Ctrl+Y         toggle notes panel",
+    "  Ctrl+N         new file / new note (in notes panel)",
+    "  Ctrl+D         delete selected file / note",
     "  Ctrl+T         filter by file type (e.g. c,h)",
     "  Ctrl+L         toggle CWD ↔ C library",
     "  Ctrl+B         build (make if Makefile, else gcc on open .c)",
     "  Ctrl+O         toggle embedded terminal panel",
     "  e              enter editor",
+    "",
+    "  Notes panel (Ctrl+Y to open):",
+    "  ↑ ↓ / j k     navigate notes",
+    "  → / Enter      open note",
+    "  ←              back to file tree",
+    "  e              edit open note",
+    "  Ctrl+N         new note (sifre isteği sorulur)",
+    "  Ctrl+D         delete note",
+    "  /              search in unencrypted notes",
+    "",
+    "  Not duzenleme (e ile girilir):",
+    "  Esc            cik",
+    "  Ctrl+S         kaydet",
+    "  Ctrl+E         sifre ekle / degistir / kaldir",
     "",
     "  Editor shortcuts (press e to enter):",
     "  Esc            exit editor",
@@ -5499,19 +6523,79 @@ static const char *help_lines[] = {
 };
 
 static void draw_help(const App *app) {
-    (void)app;
     clear();
     int clip = COLS - 4;
-    attron(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
-    print_clipped(0, 2, clip, help_lines[0]);
-    attroff(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
-    int rows = LINES - 2;
-    for (int i = 1; help_lines[i] && i <= rows; i++)
-        print_clipped(i, 2, clip, help_lines[i]);
+    int rows = LINES - 1;
+    int offset = app->help_offset;
+
+    /* count total lines */
+    int total = 0;
+    while (help_lines[total]) total++;
+
+    for (int row = 0; row < rows; row++) {
+        int li = offset + row;
+        if (li >= total) break;
+        if (li == 0) {
+            attron(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
+            print_clipped(row, 2, clip, help_lines[0]);
+            attroff(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
+        } else {
+            print_clipped(row, 2, clip, help_lines[li]);
+        }
+    }
+
+    /* scroll indicator at bottom right */
+    if (total > rows) {
+        char ind[16];
+        snprintf(ind, sizeof(ind), "%d/%d", offset + 1, total - rows + 1);
+        mvprintw(LINES - 1, COLS - (int)strlen(ind) - 2, "%s", ind);
+    }
 }
 
 static void handle_help(App *app, int key) {
-    (void)key;
+    int total = 0;
+    while (help_lines[total]) total++;
+    int max_off = total - (LINES - 1);
+    if (max_off < 0) max_off = 0;
+
+    switch (key) {
+    case KEY_UP:   case 'k':
+        if (app->help_offset > 0) app->help_offset--;
+        return;
+    case KEY_DOWN: case 'j':
+        if (app->help_offset < max_off) app->help_offset++;
+        return;
+    case KEY_PPAGE:
+        app->help_offset -= LINES - 2;
+        if (app->help_offset < 0) app->help_offset = 0;
+        return;
+    case KEY_NPAGE:
+        app->help_offset += LINES - 2;
+        if (app->help_offset > max_off) app->help_offset = max_off;
+        return;
+    case 'g':
+        app->help_offset = 0;
+        return;
+    case 'G':
+        app->help_offset = max_off;
+        return;
+    case KEY_MOUSE: {
+        MEVENT ev;
+        if (getmouse(&ev) == OK) {
+            if (ev.bstate & BUTTON4_PRESSED) {
+                if (app->help_offset > 0) app->help_offset--;
+            } else if (BUTTON_PRESS(ev.bstate, 5)) {
+                if (app->help_offset < max_off) app->help_offset++;
+            }
+        } else {
+            if (app->help_offset < max_off) app->help_offset++;
+        }
+        return;
+    }
+    default:
+        break;
+    }
+    /* any other key closes help */
     app->mode = app->help_prev_mode;
     if (app->mode == MODE_EDIT)
         curs_set(1);
@@ -5593,7 +6677,8 @@ void tui_run(App *app) {
         if (key == KEY_MOUSE) {
             int handles_scroll = (app->mode == MODE_LIST ||
                                   app->mode == MODE_CONTENT ||
-                                  app->mode == MODE_EDIT);
+                                  app->mode == MODE_EDIT ||
+                                  app->mode == MODE_NOTES);
             if (!handles_scroll) {
                 MEVENT ev;
                 getmouse(&ev);
@@ -5602,19 +6687,24 @@ void tui_run(App *app) {
         }
 
         switch (app->mode) {
-        case MODE_LIST:        handle_list(app, key);        break;
-        case MODE_CONTENT:     handle_content(app, key);     break;
-        case MODE_SEARCH:      handle_search(app, key);      break;
-        case MODE_GREP:        handle_grep(app, key);        break;
-        case MODE_EDIT:        handle_edit(app, key);        break;
-        case MODE_EDIT_FIND:   handle_edit_find(app, key);   break;
-        case MODE_FILTER:      handle_filter(app, key);      break;
-        case MODE_GOTO:        handle_goto(app, key);        break;
-        case MODE_NEW_FILE:    handle_new_file(app, key);    break;
-        case MODE_CONFIRM_DEL: handle_confirm_del(app, key); break;
-        case MODE_COMPILE_OUT: handle_compile_out(app, key); break;
-        case MODE_HELP:        handle_help(app, key);        break;
-        case MODE_TERM:        handle_terminal(app, key);    break;
+        case MODE_LIST:         handle_list(app, key);         break;
+        case MODE_CONTENT:      handle_content(app, key);      break;
+        case MODE_SEARCH:       handle_search(app, key);       break;
+        case MODE_GREP:         handle_grep(app, key);         break;
+        case MODE_EDIT:         handle_edit(app, key);         break;
+        case MODE_EDIT_FIND:    handle_edit_find(app, key);    break;
+        case MODE_FILTER:       handle_filter(app, key);       break;
+        case MODE_GOTO:         handle_goto(app, key);         break;
+        case MODE_NEW_FILE:     handle_new_file(app, key);     break;
+        case MODE_CONFIRM_DEL:  handle_confirm_del(app, key);  break;
+        case MODE_COMPILE_OUT:  handle_compile_out(app, key);  break;
+        case MODE_HELP:         handle_help(app, key);         break;
+        case MODE_TERM:         handle_terminal(app, key);     break;
+        case MODE_NOTES:        handle_notes(app, key);        break;
+        case MODE_NOTE_PW:      handle_note_pw(app, key);      break;
+        case MODE_NOTE_NEW:     handle_note_new(app, key);     break;
+        case MODE_NOTE_SEARCH:  handle_note_search(app, key);  break;
+        case MODE_NOTE_SET_PW:  handle_note_set_pw(app, key);  break;
         }
     }
 
@@ -5634,6 +6724,13 @@ void tui_run(App *app) {
 
     boundary_dirs_free(app);
     loaded_dirs_free(app);
+
+    if (app->vault) {
+        sodium_memzero(app->note_active_pw, sizeof(app->note_active_pw));
+        vault_close(app->vault);
+        free(app->vault);
+        app->vault = NULL;
+    }
 
     if (app->term) {
         term_free(app->term);
