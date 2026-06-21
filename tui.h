@@ -35,9 +35,10 @@ typedef enum {
     MODE_TERM,        /* Ctrl+O: embedded PTY terminal panel */
     MODE_NOTES,       /* Ctrl+Y: notes tree panel active */
     MODE_NOTE_PW,     /* password prompt for locked note */
-    MODE_NOTE_NEW,    /* new note title prompt */
-    MODE_NOTE_SEARCH, /* search inside notes */
-    MODE_NOTE_SET_PW, /* Ctrl+E: set/change/remove note password */
+    MODE_NOTE_NEW,     /* new note title prompt */
+    MODE_NOTE_NEW_CAT, /* Ctrl+K: new category/folder prompt */
+    MODE_NOTE_SEARCH,  /* search inside notes */
+    MODE_NOTE_SET_PW,  /* Ctrl+E: set/change/remove note password */
 } Mode;
 
 typedef enum { NVIEW_CAT = 0, NVIEW_NOTE = 1 } NViewKind;
@@ -259,6 +260,10 @@ typedef struct {
     int        note_new_pw1_len;
     char       note_new_pw2[256];
     int        note_new_pw2_len;
+
+    /* MODE_NOTE_NEW_CAT (Ctrl+K in notes panel) */
+    char note_new_cat_buf[NOTE_CAT_LEN];
+    int  note_new_cat_len;
 
     /* MODE_NOTE_SET_PW (Ctrl+E in edit mode) */
     int        note_setpw_step;         /* 0=current pw, 1=new pw, 2=confirm */

@@ -2014,7 +2014,8 @@ static void draw_content(const App *app) {
     if (app->open_file < 0 && app->open_note < 0) {
         /* In notes mode show a short hint instead of the full index */
         if (app->mode == MODE_NOTES || app->mode == MODE_NOTE_PW ||
-            app->mode == MODE_NOTE_NEW || app->mode == MODE_NOTE_SEARCH) {
+            app->mode == MODE_NOTE_NEW || app->mode == MODE_NOTE_NEW_CAT ||
+            app->mode == MODE_NOTE_SEARCH) {
             int clip = COLS - RIGHT_X - 3;
             int y = PANEL_Y + 2;
             attron(A_DIM);
@@ -2450,7 +2451,8 @@ static void redraw(const App *app) {
         draw_divider();
         draw_compile_out(app);
     } else if (app->mode == MODE_NOTES || app->mode == MODE_NOTE_PW ||
-               app->mode == MODE_NOTE_NEW || app->mode == MODE_NOTE_SEARCH) {
+               app->mode == MODE_NOTE_NEW || app->mode == MODE_NOTE_NEW_CAT ||
+               app->mode == MODE_NOTE_SEARCH) {
         draw_notes_panel(app);
         draw_divider();
         draw_content(app);
@@ -2521,6 +2523,17 @@ static void redraw(const App *app) {
                          RIGHT_W - 26, RIGHT_W - 26, h->line);
                 if (is_sel) attroff(COLOR_PAIR(CP_SELECTED) | A_BOLD);
             }
+        } else if (app->mode == MODE_NOTE_NEW_CAT) {
+            int mid = PANEL_Y + PANEL_H / 2;
+            attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            mvhline(mid,     RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 1, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvhline(mid + 2, RIGHT_X + 1, ' ', RIGHT_W - 2);
+            mvprintw(mid, RIGHT_X + 2, "Yeni klasor adi:");
+            attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            mvprintw(mid + 1, RIGHT_X + 2, "%s", app->note_new_cat_buf);
+            mvprintw(mid + 2, RIGHT_X + 2, "[Enter] olustur  [Esc] iptal");
+            move(mid + 1, RIGHT_X + 2 + app->note_new_cat_len);
         }
     } else if ((app->mode == MODE_EDIT || app->mode == MODE_NOTE_SET_PW)
                && app->open_note >= 0) {
@@ -5155,6 +5168,33 @@ static void ensure_vault(App *app) {
     rebuild_notes_view(app);
 }
 
+static void handle_note_new_cat(App *app, int key) {
+    NoteVault *v = app->vault;
+    if (key == 27) { /* Esc */
+        app->mode = MODE_NOTES;
+        curs_set(0);
+        return;
+    }
+    if (key == '\n' || key == '\r') {
+        if (app->note_new_cat_len > 0 && v) {
+            vault_add_cat(v, app->note_new_cat_buf);
+            vault_save(v);
+            rebuild_notes_view(app);
+        }
+        app->mode = MODE_NOTES;
+        curs_set(0);
+        return;
+    }
+    if ((key == KEY_BACKSPACE || key == 127 || key == '\b') && app->note_new_cat_len > 0) {
+        app->note_new_cat_buf[--app->note_new_cat_len] = '\0';
+        return;
+    }
+    if (key >= 32 && key < 127 && app->note_new_cat_len < NOTE_CAT_LEN - 1) {
+        app->note_new_cat_buf[app->note_new_cat_len++] = (char)key;
+        app->note_new_cat_buf[app->note_new_cat_len]   = '\0';
+    }
+}
+
 static void handle_notes(App *app, int key) {
     int view_h = PANEL_H / 2 - 2;
     NoteVault *v = app->vault;
@@ -5248,6 +5288,14 @@ static void handle_notes(App *app, int key) {
         app->note_hit_sel   = 0;
         app->note_hit_offset = 0;
         app->mode = MODE_NOTE_SEARCH;
+        curs_set(1);
+        break;
+
+    case 11: /* Ctrl+K — new category/folder */
+        if (!v) break;
+        app->note_new_cat_buf[0] = '\0';
+        app->note_new_cat_len    = 0;
+        app->mode = MODE_NOTE_NEW_CAT;
         curs_set(1);
         break;
 
@@ -6488,6 +6536,7 @@ static const char *help_lines[] = {
     "  ←              back to file tree",
     "  e              edit open note",
     "  Ctrl+N         new note (sifre isteği sorulur)",
+    "  Ctrl+K         new category/folder",
     "  Ctrl+D         delete note",
     "  /              search in unencrypted notes",
     "",
@@ -6704,6 +6753,7 @@ void tui_run(App *app) {
         case MODE_NOTES:        handle_notes(app, key);        break;
         case MODE_NOTE_PW:      handle_note_pw(app, key);      break;
         case MODE_NOTE_NEW:     handle_note_new(app, key);     break;
+        case MODE_NOTE_NEW_CAT: handle_note_new_cat(app, key); break;
         case MODE_NOTE_SEARCH:  handle_note_search(app, key);  break;
         case MODE_NOTE_SET_PW:  handle_note_set_pw(app, key);  break;
         }
