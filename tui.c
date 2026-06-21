@@ -850,6 +850,26 @@ static void draw_status(const App *app) {
             mvprintw(STATUS_Y, COLS - 27, "(Enter=create  Esc=cancel)");
             attroff(A_BOLD);
         }
+    } else if (app->mode == MODE_NEW_DIR) {
+        const char *sub = new_file_target_subdir(app);
+        if (sub[0])
+            mvprintw(STATUS_Y, 1, " New dir in %s/: %s", sub, app->new_dir_buf);
+        else
+            mvprintw(STATUS_Y, 1, " New dir: %s", app->new_dir_buf);
+        int prefix = sub[0] ? 16 + (int)strlen(sub) : 10;
+        attron(A_BLINK | A_BOLD);
+        mvaddch(STATUS_Y, prefix + app->new_dir_len, '_');
+        attroff(A_BLINK | A_BOLD);
+        if (app->new_dir_msg[0]) {
+            attron(A_BOLD | COLOR_PAIR(CP_EXT_BIN));
+            mvprintw(STATUS_Y, COLS - (int)strlen(app->new_dir_msg) - 2,
+                     "%s", app->new_dir_msg);
+            attroff(A_BOLD | COLOR_PAIR(CP_EXT_BIN));
+        } else {
+            attron(A_BOLD);
+            mvprintw(STATUS_Y, COLS - 27, "(Enter=create  Esc=cancel)");
+            attroff(A_BOLD);
+        }
     } else if (app->mode == MODE_CONFIRM_DEL) {
         /* Use stored path/filename — index may be stale after a rescan */
         const char *fpath = app->del_pending_path[0] ? app->del_pending_path : "?";
@@ -4312,6 +4332,96 @@ static void handle_new_file(App *app, int key) {
     }
 }
 
+static void enter_new_dir_mode(App *app) {
+    app->new_dir_buf[0] = '\0';
+    app->new_dir_len    = 0;
+    app->new_dir_msg[0] = '\0';
+    app->mode = MODE_NEW_DIR;
+    curs_set(1);
+}
+
+static void handle_new_dir(App *app, int key) {
+    switch (key) {
+    case 27:
+        app->mode = MODE_LIST;
+        curs_set(0);
+        break;
+    case '\n': case '\r': {
+        if (app->new_dir_len == 0) { app->mode = MODE_LIST; curs_set(0); break; }
+        if (strchr(app->new_dir_buf, '/') ||
+            strcmp(app->new_dir_buf, "..") == 0 ||
+            strncmp(app->new_dir_buf, "../", 3) == 0) {
+            snprintf(app->new_dir_msg, sizeof(app->new_dir_msg),
+                     "Invalid name: no path separators allowed");
+            break;
+        }
+        const char *sub = new_file_target_subdir(app);
+        char full[META_PATH_LEN];
+        char new_sub[META_SUBDIR_LEN];
+        if (sub[0]) {
+            snprintf(full,    sizeof(full),    "%s/%s/%s",
+                     app->scan_dir_path, sub, app->new_dir_buf);
+            snprintf(new_sub, sizeof(new_sub), "%s/%s", sub, app->new_dir_buf);
+        } else {
+            snprintf(full,    sizeof(full),    "%s/%s",
+                     app->scan_dir_path, app->new_dir_buf);
+            strncpy(new_sub, app->new_dir_buf, sizeof(new_sub) - 1);
+        }
+        struct stat st;
+        if (stat(full, &st) == 0) {
+            snprintf(app->new_dir_msg, sizeof(app->new_dir_msg),
+                     "Already exists: %s", app->new_dir_buf);
+            break;
+        }
+        if (mkdir(full, 0755) != 0) {
+            snprintf(app->new_dir_msg, sizeof(app->new_dir_msg),
+                     "Error: %s", strerror(errno));
+            break;
+        }
+        /* Add to boundary_dirs so it appears in the tree without a full rescan */
+        int new_total = app->boundary_dir_count + 1;
+        char (*tmp)[META_SUBDIR_LEN] = realloc(app->boundary_dirs,
+                                               new_total * sizeof(*app->boundary_dirs));
+        if (tmp) {
+            app->boundary_dirs = tmp;
+            strncpy(app->boundary_dirs[app->boundary_dir_count++],
+                    new_sub, META_SUBDIR_LEN - 1);
+        }
+        build_tree(app);
+        /* Navigate to the new directory in the tree */
+        for (int i = 0; i < app->tree_view_count; i++) {
+            int vi = app->tree_view[i];
+            if (app->tree_all[vi].kind == NODE_DIR &&
+                strcmp(app->tree_all[vi].subdir, new_sub) == 0) {
+                app->tree_sel = i;
+                int view_h = PANEL_H - META_PANEL_H - 1;
+                if (app->tree_sel < app->tree_offset)
+                    app->tree_offset = app->tree_sel;
+                if (app->tree_sel >= app->tree_offset + view_h)
+                    app->tree_offset = app->tree_sel - view_h + 1;
+                break;
+            }
+        }
+        app->mode = MODE_LIST;
+        curs_set(0);
+        break;
+    }
+    case KEY_BACKSPACE: case 127: case '\b':
+        if (app->new_dir_len > 0)
+            app->new_dir_buf[--app->new_dir_len] = '\0';
+        app->new_dir_msg[0] = '\0';
+        break;
+    default:
+        if (key >= 32 && key < 127 && key != '/' &&
+            app->new_dir_len < (int)sizeof(app->new_dir_buf) - 2) {
+            app->new_dir_buf[app->new_dir_len++] = (char)key;
+            app->new_dir_buf[app->new_dir_len]   = '\0';
+            app->new_dir_msg[0] = '\0';
+        }
+        break;
+    }
+}
+
 static void enter_confirm_del(App *app, int file_idx, int prev_mode) {
     app->del_pending_idx = file_idx;
     if (file_idx >= 0 && file_idx < app->file_count)
@@ -4882,6 +4992,10 @@ static void handle_list_tree(App *app, int key) {
         enter_new_file_mode(app);
         break;
 
+    case 11: /* Ctrl+K — new directory */
+        enter_new_dir_mode(app);
+        break;
+
     case 4: { /* Ctrl+D — delete selected file */
         if (app->tree_view_count > 0) {
             int vi = app->tree_view[app->tree_sel];
@@ -5027,6 +5141,10 @@ static void handle_list_filtered(App *app, int key) {
 
     case 14: /* Ctrl+N — new file */
         enter_new_file_mode(app);
+        break;
+
+    case 11: /* Ctrl+K — new directory */
+        enter_new_dir_mode(app);
         break;
 
     case 4: /* Ctrl+D — delete selected file */
@@ -5261,7 +5379,18 @@ static void handle_notes(App *app, int key) {
         if (!v) break;
         app->note_new_title[0]  = '\0';
         app->note_new_title_len = 0;
-        app->note_new_cat_sel   = 0;
+        /* Pre-select the category the cursor is on (or the note's category) */
+        app->note_new_cat_sel = 0;
+        if (app->notes_view_count > 0) {
+            NViewItem cur = app->notes_view[app->notes_sel];
+            if (cur.kind == NVIEW_CAT)
+                app->note_new_cat_sel = cur.idx;
+            else if (cur.kind == NVIEW_NOTE)
+                for (int ci = 0; ci < v->cat_count; ci++)
+                    if (strcmp(v->notes[cur.idx].cat_id, v->cats[ci].id) == 0) {
+                        app->note_new_cat_sel = ci; break;
+                    }
+        }
         app->mode = MODE_NOTE_NEW;
         curs_set(1);
         break;
@@ -6523,6 +6652,7 @@ static const char *help_lines[] = {
     "  In-app controls:",
     "  Ctrl+Y         toggle notes panel",
     "  Ctrl+N         new file / new note (in notes panel)",
+    "  Ctrl+K         new directory (file panel) / new folder (notes panel)",
     "  Ctrl+D         delete selected file / note",
     "  Ctrl+T         filter by file type (e.g. c,h)",
     "  Ctrl+L         toggle CWD ↔ C library",
@@ -6746,6 +6876,7 @@ void tui_run(App *app) {
         case MODE_FILTER:       handle_filter(app, key);       break;
         case MODE_GOTO:         handle_goto(app, key);         break;
         case MODE_NEW_FILE:     handle_new_file(app, key);     break;
+        case MODE_NEW_DIR:      handle_new_dir(app, key);      break;
         case MODE_CONFIRM_DEL:  handle_confirm_del(app, key);  break;
         case MODE_COMPILE_OUT:  handle_compile_out(app, key);  break;
         case MODE_HELP:         handle_help(app, key);         break;

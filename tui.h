@@ -29,6 +29,7 @@ typedef enum {
     MODE_FILTER,      /* Ctrl+T: file-type extension filter prompt */
     MODE_GOTO,        /* Ctrl+G: go to directory prompt */
     MODE_NEW_FILE,    /* Ctrl+N: new file name prompt */
+    MODE_NEW_DIR,     /* Ctrl+K: new directory name prompt */
     MODE_CONFIRM_DEL, /* Ctrl+D: delete confirmation prompt */
     MODE_COMPILE_OUT, /* Ctrl+B: build output viewer */
     MODE_HELP,        /* ?: shortcuts overlay */
@@ -174,7 +175,12 @@ typedef struct {
     /* New-file prompt (MODE_NEW_FILE) */
     char new_file_buf[META_NAME_LEN];
     int  new_file_len;
-    char new_file_msg[128]; /* error/status message shown in status bar */
+    char new_file_msg[128];
+
+    /* New-dir prompt (MODE_NEW_DIR) */
+    char new_dir_buf[META_NAME_LEN];
+    int  new_dir_len;
+    char new_dir_msg[128];
 
     /* Delete confirmation (MODE_CONFIRM_DEL) */
     int  del_pending_idx;              /* files[] index at confirm time (-1 = none) */
