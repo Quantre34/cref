@@ -5213,6 +5213,7 @@ static void handle_notes(App *app, int key) {
 
     case 25: /* Ctrl+Y — toggle back to file tree */
         vault_lock_pw_notes(app);
+        app->open_note = -1;
         app->mode = MODE_LIST;
         break;
 
