@@ -4378,7 +4378,10 @@ static void handle_new_dir(App *app, int key) {
                      "Error: %s", strerror(errno));
             break;
         }
-        /* Add to boundary_dirs so it appears in the tree without a full rescan */
+        /* Add to boundary_dirs so it appears in the tree without a full rescan.
+           Also add to loaded_dirs so start_subdir_scan skips it — otherwise
+           expanding the empty dir triggers a scan that removes it from
+           boundary_dirs and build_tree stops showing it. */
         int new_total = app->boundary_dir_count + 1;
         char (*tmp)[META_SUBDIR_LEN] = realloc(app->boundary_dirs,
                                                new_total * sizeof(*app->boundary_dirs));
@@ -4387,6 +4390,7 @@ static void handle_new_dir(App *app, int key) {
             strncpy(app->boundary_dirs[app->boundary_dir_count++],
                     new_sub, META_SUBDIR_LEN - 1);
         }
+        loaded_dirs_add(app, new_sub);
         build_tree(app);
         /* Navigate to the new directory in the tree */
         for (int i = 0; i < app->tree_view_count; i++) {
