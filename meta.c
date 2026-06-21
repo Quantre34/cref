@@ -119,7 +119,7 @@ static int count_lines(const char *path) {
 
 static const char *SKIP_FILES[] = { "INDEX.md", "FRONTMATTER-FORMAT.md", NULL };
 static const char *SKIP_DIRS[]  = {
-    "node_modules", ".git", "dist", "build", ".cache",
+    "node_modules", ".git", "dist", ".cache",
     "vendor", "target", ".next", "coverage",
     "proc", "sys", "dev", "__pycache__", ".venv", "snap",
     NULL

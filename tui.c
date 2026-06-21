@@ -3822,14 +3822,18 @@ static void apply_scan_result(App *app) {
         free(new_files);
 
         /* Update boundary_dirs: remove loaded_sub, add new disc dirs */
-        /* Remove loaded_sub from boundary_dirs */
-        for (int i = 0; i < app->boundary_dir_count; i++) {
-            if (strcmp(app->boundary_dirs[i], loaded_sub) == 0) {
-                /* Shift remaining entries left */
-                memmove(&app->boundary_dirs[i], &app->boundary_dirs[i + 1],
-                        (app->boundary_dir_count - i - 1) * sizeof(*app->boundary_dirs));
-                app->boundary_dir_count--;
-                break;
+        /* Only remove loaded_sub from boundary_dirs if the scan found content.
+           Empty dirs (no files, no children) stay as boundary entries so
+           build_tree keeps them visible — removing them makes the dir and all
+           parent dirs that were only visible through this entry disappear. */
+        if (new_count > 0 || disc_count > 0) {
+            for (int i = 0; i < app->boundary_dir_count; i++) {
+                if (strcmp(app->boundary_dirs[i], loaded_sub) == 0) {
+                    memmove(&app->boundary_dirs[i], &app->boundary_dirs[i + 1],
+                            (app->boundary_dir_count - i - 1) * sizeof(*app->boundary_dirs));
+                    app->boundary_dir_count--;
+                    break;
+                }
             }
         }
         /* Add new disc dirs (grow array if needed) */
