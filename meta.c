@@ -240,6 +240,10 @@ FileMeta *scan_dir(const char *dir, int *count_out,
         DIR *d = opendir(full);
         if (!d) continue;
 
+        int files_before = count;
+        int queue_before = qtail;
+        int disc_before  = disc_count;
+
         struct dirent *entry;
         while ((entry = readdir(d)) != NULL) {
             if (cancel && *cancel) break;
@@ -323,6 +327,19 @@ FileMeta *scan_dir(const char *dir, int *count_out,
             }
         }
         closedir(d);
+
+        /* If this dir (not root) produced no files and no subdirs of any kind,
+           add it to disc_arr so it stays visible in the tree as an empty node. */
+        if (rel[0] && disc_arr &&
+            count == files_before && qtail == queue_before && disc_count == disc_before) {
+            if (disc_count >= disc_cap) {
+                int nc = disc_cap * 2;
+                char (*tmp)[META_SUBDIR_LEN] = realloc(disc_arr, nc * sizeof(*disc_arr));
+                if (tmp) { disc_arr = tmp; disc_cap = nc; }
+            }
+            if (disc_count < disc_cap)
+                strncpy(disc_arr[disc_count++], rel, META_SUBDIR_LEN - 1);
+        }
     }
 
 done:
