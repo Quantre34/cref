@@ -115,11 +115,18 @@ static int utf8_char_bytes(unsigned char c) {
 
 /* Terminal display column for byte offset byte_col in s.
    Each UTF-8 character counts as 1 display column (Latin/Turkish range). */
+/* Note: tab stops are computed relative to string start.  This matches
+   terminal tab stops only when cont_col (currently 40) is a multiple of 8. */
 static int utf8_display_col(const char *s, int byte_col) {
     int dcol = 0, i = 0;
     while (i < byte_col && s[i]) {
-        i += utf8_char_bytes((unsigned char)s[i]);
-        dcol++;
+        if ((unsigned char)s[i] == '\t') {
+            dcol = (dcol + 8) & ~7;
+            i++;
+        } else {
+            i += utf8_char_bytes((unsigned char)s[i]);
+            dcol++;
+        }
     }
     return dcol;
 }
@@ -836,7 +843,7 @@ static void draw_status(const App *app) {
             mvprintw(STATUS_Y, 1, " New file in %s/: %s", sub, app->new_file_buf);
         else
             mvprintw(STATUS_Y, 1, " New file: %s", app->new_file_buf);
-        int prefix = sub[0] ? 17 + (int)strlen(sub) : 11;
+        int prefix = sub[0] ? 17 + (int)strlen(sub) : 12;
         attron(A_BLINK | A_BOLD);
         mvaddch(STATUS_Y, prefix + app->new_file_len, '_');
         attroff(A_BLINK | A_BOLD);
@@ -856,7 +863,7 @@ static void draw_status(const App *app) {
             mvprintw(STATUS_Y, 1, " New dir in %s/: %s", sub, app->new_dir_buf);
         else
             mvprintw(STATUS_Y, 1, " New dir: %s", app->new_dir_buf);
-        int prefix = sub[0] ? 16 + (int)strlen(sub) : 10;
+        int prefix = sub[0] ? 16 + (int)strlen(sub) : 11;
         attron(A_BLINK | A_BOLD);
         mvaddch(STATUS_Y, prefix + app->new_dir_len, '_');
         attroff(A_BLINK | A_BOLD);
@@ -2023,6 +2030,29 @@ static int render_syntax_chunk(int y, int x, int mw __attribute__((unused)),
     return in_ml;
 }
 
+/* Expand tabs to spaces for rendering. start_col is the display column
+   at which src starts (for tab-stop alignment). Output is padded to
+   exactly mw display columns and NUL-terminated. Returns output length. */
+static int tab_expand_for_display(const char *src, int slen,
+                                   char *dst, int dst_cap,
+                                   int start_col, int mw) {
+    int si = 0, di = 0, dcol = 0;
+    while (si < slen && dcol < mw && di < dst_cap - 1) {
+        if ((unsigned char)src[si] == '\t') {
+            int next_rel = ((start_col + dcol + 8) & ~7) - start_col;
+            if (next_rel > mw) next_rel = mw;
+            while (dcol < next_rel && di < dst_cap - 1) { dst[di++] = ' '; dcol++; }
+            si++;
+        } else {
+            dst[di++] = src[si++];
+            dcol++;
+        }
+    }
+    while (dcol < mw && di < dst_cap - 1) { dst[di++] = ' '; dcol++; }
+    dst[di] = '\0';
+    return di;
+}
+
 /* ---------------------------------------------------------------
    Right panel: content viewer
 --------------------------------------------------------------- */
@@ -2216,6 +2246,20 @@ static void draw_content(const App *app) {
             shown[copy] = '\0';
             int slen = (int)strlen(shown);
 
+            /* Display column at the start of this chunk (for tab stops) */
+            int chunk_dcol = 0;
+            for (int li = 0; li < cs; li++) {
+                if ((unsigned char)line[li] == '\t')
+                    chunk_dcol = (chunk_dcol + 8) & ~7;
+                else
+                    chunk_dcol++;
+            }
+            /* Tab-expanded version of shown, padded to mw display columns */
+            char shown_exp[4096];
+            int shown_exp_len = tab_expand_for_display(shown, slen, shown_exp,
+                                                        sizeof(shown_exp),
+                                                        chunk_dcol, mw);
+
             if (use_bat) {
                 hl_render_line(row, cont_col, line, cs, copy,
                                app->bat_rows[si], app->bat_row_sizes[si]);
@@ -2226,18 +2270,18 @@ static void draw_content(const App *app) {
                 highlight_occurrences(app, row, cont_col, shown, slen);
             } else if (is_coded) {
                 attron(COLOR_PAIR(CP_CODE));
-                mvprintw(row, cont_col, "%-*s", mw, shown);
+                mvprintw(row, cont_col, "%s", shown_exp);
                 attroff(COLOR_PAIR(CP_CODE));
                 if (!is_fence)
-                    highlight_occurrences(app, row, cont_col, shown, slen);
+                    highlight_occurrences(app, row, cont_col, shown_exp, shown_exp_len);
             } else if (is_heading) {
                 attron(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
-                mvprintw(row, cont_col, "%-*s", mw, shown);
+                mvprintw(row, cont_col, "%s", shown_exp);
                 attroff(COLOR_PAIR(CP_MD_HEAD) | A_BOLD);
-                highlight_occurrences(app, row, cont_col, shown, slen);
+                highlight_occurrences(app, row, cont_col, shown_exp, shown_exp_len);
             } else {
-                mvprintw(row, cont_col, "%-*s", mw, shown);
-                highlight_occurrences(app, row, cont_col, shown, slen);
+                mvprintw(row, cont_col, "%s", shown_exp);
+                highlight_occurrences(app, row, cont_col, shown_exp, shown_exp_len);
             }
 
             di++;
@@ -3241,6 +3285,39 @@ static void edit_split_line(App *app) {
 /* ---------------------------------------------------------------
    Editor: selection operations
 --------------------------------------------------------------- */
+static void clipboard_sync_system(App *app) {
+    if (!app->clipboard || app->clipboard_count == 0) return;
+    int total = 0;
+    for (int i = 0; i < app->clipboard_count; i++)
+        total += app->clipboard[i] ? (int)strlen(app->clipboard[i]) : 0;
+    total += app->clipboard_count; /* newlines + NUL */
+    char *text = malloc(total);
+    if (!text) return;
+    int pos = 0;
+    for (int i = 0; i < app->clipboard_count; i++) {
+        if (app->clipboard[i]) {
+            int len = (int)strlen(app->clipboard[i]);
+            memcpy(text + pos, app->clipboard[i], len);
+            pos += len;
+        }
+        if (i < app->clipboard_count - 1)
+            text[pos++] = '\n';
+    }
+    text[pos] = '\0';
+#ifdef __APPLE__
+    FILE *pb = popen("pbcopy", "w");
+    if (pb) { fwrite(text, 1, pos, pb); pclose(pb); }
+#else
+    FILE *xc = popen("xclip -selection clipboard 2>/dev/null", "w");
+    if (xc) { fwrite(text, 1, pos, xc); pclose(xc); }
+    else {
+        FILE *xs = popen("xsel --clipboard --input 2>/dev/null", "w");
+        if (xs) { fwrite(text, 1, pos, xs); pclose(xs); }
+    }
+#endif
+    free(text);
+}
+
 static void edit_copy_sel(App *app) {
     if (!app->sel_active) return;
     int r0,c0,r1,c1;
@@ -3267,6 +3344,7 @@ static void edit_copy_sel(App *app) {
             app->clipboard[i][sz] = '\0';
         }
     }
+    clipboard_sync_system(app);
 }
 
 static void edit_delete_sel(App *app) {
@@ -4326,7 +4404,7 @@ static void handle_new_file(App *app, int key) {
         app->new_file_msg[0] = '\0';
         break;
     default:
-        if (key >= 32 && key < 127 && key != '/' &&
+        if (key > 32 && key < 127 && key != '/' &&
             app->new_file_len < (int)sizeof(app->new_file_buf) - 2) {
             app->new_file_buf[app->new_file_len++] = (char)key;
             app->new_file_buf[app->new_file_len]   = '\0';
@@ -4420,7 +4498,7 @@ static void handle_new_dir(App *app, int key) {
         app->new_dir_msg[0] = '\0';
         break;
     default:
-        if (key >= 32 && key < 127 && key != '/' &&
+        if (key > 32 && key < 127 && key != '/' &&
             app->new_dir_len < (int)sizeof(app->new_dir_buf) - 2) {
             app->new_dir_buf[app->new_dir_len++] = (char)key;
             app->new_dir_buf[app->new_dir_len]   = '\0';
@@ -6045,6 +6123,15 @@ static void handle_content(App *app, int key) {
     }
 }
 
+static int is_makefile(const App *app) {
+    if (app->open_file < 0) return 0;
+    const char *n = app->files[app->open_file].filename;
+    int l = (int)strlen(n);
+    return strcmp(n, "Makefile") == 0 || strcmp(n, "makefile") == 0 ||
+           strcmp(n, "GNUmakefile") == 0 ||
+           (l > 3 && strcmp(n + l - 3, ".mk") == 0);
+}
+
 static void handle_edit(App *app, int key) {
     if (app->save_flash > 0) app->save_flash--;
     app->last_key = key;
@@ -6343,10 +6430,12 @@ static void handle_edit(App *app, int key) {
         edit_delete_after(app);
         break;
 
-    /* Tab → 4 spaces */
     case '\t':
         if (app->sel_active) { edit_delete_sel(app); sel_clear(app); }
-        for (int i = 0; i < 4; i++) edit_insert_char(app, ' ');
+        if (is_makefile(app))
+            edit_insert_char(app, '\t');
+        else
+            for (int i = 0; i < 4; i++) edit_insert_char(app, ' ');
         break;
 
     case KEY_MOUSE: {
