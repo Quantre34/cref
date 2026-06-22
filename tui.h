@@ -291,6 +291,7 @@ typedef struct {
 
     Mode mode;
     int  quit;
+    int  pasting;   /* 1 while bracketed paste is in progress */
 } App;
 
 void tui_init(void);

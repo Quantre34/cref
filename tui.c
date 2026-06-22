@@ -85,6 +85,8 @@ typedef struct {
 #define KEY_LINE_MOVE_DN  610   /* Alt+Down — move line down */
 #define KEY_SEL_PGUP      611   /* Shift+PgUp — extend selection */
 #define KEY_SEL_PGDN      612   /* Shift+PgDn — extend selection */
+#define KEY_PASTE_START   613   /* \x1b[200~  — bracketed paste begin */
+#define KEY_PASTE_END     614   /* \x1b[201~  — bracketed paste end   */
 
 /* Grep view column layout */
 #define GREP_LBL_W   24
@@ -250,6 +252,12 @@ void tui_init(void) {
     define_key("\033[5;2~", KEY_SEL_PGUP);
     define_key("\033[6;2~", KEY_SEL_PGDN);
 
+    /* Bracketed paste — terminal wraps pasted text with these markers */
+    define_key("\033[200~", KEY_PASTE_START);
+    define_key("\033[201~", KEY_PASTE_END);
+    fputs("\033[?2004h", stdout);   /* enable bracketed paste mode */
+    fflush(stdout);
+
     if (has_colors()) {
         start_color();
         use_default_colors();
@@ -284,6 +292,8 @@ void tui_init(void) {
 }
 
 void tui_cleanup(void) {
+    fputs("\033[?2004l", stdout);   /* disable bracketed paste mode */
+    fflush(stdout);
     endwin();
 }
 
@@ -6389,29 +6399,30 @@ static void handle_edit(App *app, int key) {
         cursor_clamp(app); cursor_scroll(app);
         break;
 
-    /* Enter — split line with auto-indent */
+    /* Enter — split line with auto-indent (skipped during bracketed paste) */
     case '\n':
     case '\r':
         if (app->sel_active) edit_delete_sel(app);
         {
-            /* Capture leading whitespace of current line for auto-indent */
-            const char *cl = app->content.lines[app->cursor_row];
-            int ind = 0;
-            while (cl[ind] == ' ' || cl[ind] == '\t') ind++;
-            /* If cursor is within the leading whitespace, don't carry indent
-               (matches what most editors do — empty new line). */
-            if (app->cursor_col < ind) ind = 0;
             char *indent_buf = NULL;
-            if (ind > 0) {
-                indent_buf = malloc(ind + 1);
-                if (indent_buf) {
-                    memcpy(indent_buf, cl, ind);
-                    indent_buf[ind] = '\0';
+            if (!app->pasting) {
+                /* Capture leading whitespace of current line for auto-indent */
+                const char *cl = app->content.lines[app->cursor_row];
+                int ind = 0;
+                while (cl[ind] == ' ' || cl[ind] == '\t') ind++;
+                /* If cursor is within the leading whitespace, don't carry indent */
+                if (app->cursor_col < ind) ind = 0;
+                if (ind > 0) {
+                    indent_buf = malloc(ind + 1);
+                    if (indent_buf) {
+                        memcpy(indent_buf, cl, ind);
+                        indent_buf[ind] = '\0';
+                    }
                 }
             }
             edit_split_line(app);
             if (indent_buf) {
-                for (int i = 0; i < ind; i++)
+                for (int i = 0; i < (int)strlen(indent_buf); i++)
                     edit_insert_char(app, indent_buf[i]);
                 free(indent_buf);
             }
@@ -6948,6 +6959,10 @@ void tui_run(App *app) {
             }
             continue;
         }
+
+        /* Bracketed paste markers — set/clear pasting flag globally */
+        if (key == KEY_PASTE_START) { app->pasting = 1; continue; }
+        if (key == KEY_PASTE_END)   { app->pasting = 0; continue; }
 
         /* Drain mouse events for modes that don't handle scroll.
            Handlers that DO use getmouse() (list/content/edit) call it themselves. */
