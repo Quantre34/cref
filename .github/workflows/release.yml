@@ -15,11 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: brew install libsodium
+
       - name: Build universal binary
         run: |
           make release \
-            CFLAGS="-Wall -Wextra -std=c11 -O2 -DNDEBUG -arch x86_64 -arch arm64" \
-            LDFLAGS="-lncurses -arch x86_64 -arch arm64"
+            CFLAGS="-Wall -Wextra -std=c11 -O2 -DNDEBUG -arch x86_64 -arch arm64 -I/opt/homebrew/include" \
+            LDFLAGS="-lncurses -lsodium -arch x86_64 -arch arm64 -L/opt/homebrew/lib"
 
       - name: Verify and split
         run: |
@@ -43,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y libncurses-dev
+        run: sudo apt-get install -y libncurses-dev libsodium-dev
 
       - name: Build
         run: make release
