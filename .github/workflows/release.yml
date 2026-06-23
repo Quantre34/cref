@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-macos:
-    name: Build macOS (universal)
+  build-macos-arm64:
+    name: Build macOS arm64
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,25 +18,37 @@ jobs:
       - name: Install dependencies
         run: brew install libsodium
 
-      - name: Build universal binary
-        run: |
-          make release \
-            CFLAGS="-Wall -Wextra -std=c11 -O2 -DNDEBUG -arch x86_64 -arch arm64 -I/opt/homebrew/include" \
-            LDFLAGS="-lncurses -lsodium -arch x86_64 -arch arm64 -L/opt/homebrew/lib"
+      - name: Build
+        run: make release
 
-      - name: Verify and split
-        run: |
-          file cref
-          lipo -info cref
-          lipo cref -thin arm64  -output cref-darwin-arm64
-          lipo cref -thin x86_64 -output cref-darwin-x86_64
+      - name: Rename binary
+        run: mv cref cref-darwin-arm64
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            cref-darwin-arm64
-            cref-darwin-x86_64
+          files: cref-darwin-arm64
+          generate_release_notes: false
+
+  build-macos-x86_64:
+    name: Build macOS x86_64
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install libsodium
+
+      - name: Build
+        run: make release
+
+      - name: Rename binary
+        run: mv cref cref-darwin-x86_64
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cref-darwin-x86_64
           generate_release_notes: false
 
   build-linux:
