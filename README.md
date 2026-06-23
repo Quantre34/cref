@@ -30,17 +30,17 @@ The script detects your OS and architecture, downloads the correct binary from t
 
 ### Build from source
 
-**Dependencies:** `gcc`, `make`, `ncurses`
+**Dependencies:** `gcc`, `make`, `ncurses`, `libsodium`
 
 ```bash
 # macOS
-brew install ncurses   # usually already present via Xcode CLT
+brew install libsodium   # ncurses usually already present via Xcode CLT
 
 # Ubuntu / Debian
-sudo apt-get install -y libncurses-dev
+sudo apt-get install -y libncurses-dev libsodium-dev
 
 # Fedora / RHEL
-sudo dnf install -y ncurses-devel
+sudo dnf install -y ncurses-devel libsodium-devel
 ```
 
 ```bash
@@ -82,6 +82,8 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `Ctrl+L` | Toggle C reference library |
 | `Ctrl+Y` | Toggle notes panel |
 | `Ctrl+N` | New file |
+| `Ctrl+K` | New directory |
+| `Ctrl+G` | Go to directory (type path) |
 | `Ctrl+D` | Delete selected file |
 | `Ctrl+R` | Reload directory |
 | `Ctrl+B` | Build (`make` or `gcc` all `.c` files) |
@@ -97,6 +99,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `e` | Edit open note |
 | `Ctrl+Y` | Back to file tree |
 | `Ctrl+N` | New note (optionally password-protected) |
+| `Ctrl+K` | New category / folder |
 | `Ctrl+D` | Delete note |
 | `/` | Search in unencrypted notes |
 
@@ -121,8 +124,9 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `Ctrl+Z` | Undo |
 | `Ctrl+F` | Find in file |
 | `Ctrl+A` | Select all |
-| `Ctrl+C` / `Ctrl+V` | Copy / Paste |
-| `Ctrl+X` | Cut |
+| `Ctrl+C` / `Ctrl+V` | Copy / Paste (Ctrl+C also copies to OS clipboard) |
+| `Ctrl+X` | Cut (also copies to OS clipboard) |
+| `Ctrl+K` | Delete current line |
 | `Alt+↑` / `Alt+↓` | Move line up / down |
 | `Ctrl+D` | Duplicate line |
 | `Ctrl+R` | Reload file from disk |
