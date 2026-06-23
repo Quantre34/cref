@@ -30,27 +30,6 @@ jobs:
           files: cref-darwin-arm64
           generate_release_notes: false
 
-  build-macos-x86_64:
-    name: Build macOS x86_64
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: brew install libsodium
-
-      - name: Build
-        run: make release
-
-      - name: Rename binary
-        run: mv cref cref-darwin-x86_64
-
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: cref-darwin-x86_64
-          generate_release_notes: false
-
   build-linux:
     name: Build Linux x86_64
     runs-on: ubuntu-latest
