@@ -35,7 +35,13 @@ BINARY="cref-${PLATFORM}-${ARCH_TAG}"
 URL="https://github.com/${REPO}/releases/latest/download/${BINARY}"
 
 # Install runtime dependencies
-if [ "$PLATFORM" = "linux" ]; then
+if [ "$PLATFORM" = "darwin" ]; then
+    if command -v brew > /dev/null 2>&1; then
+        brew install libsodium 2>/dev/null || true
+    else
+        echo "Warning: Homebrew not found. Install libsodium manually: https://brew.sh"
+    fi
+elif [ "$PLATFORM" = "linux" ]; then
     if command -v apt-get > /dev/null 2>&1; then
         sudo apt-get install -y libncurses6 libsodium23 2>/dev/null || \
         sudo apt-get install -y libncurses5 libsodium18 2>/dev/null || true
