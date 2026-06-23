@@ -17,22 +17,32 @@ case "$OS" in
 esac
 
 case "$ARCH" in
-    x86_64)          ARCH_TAG="x86_64"  ;;
-    arm64 | aarch64) ARCH_TAG="arm64"   ;;
+    x86_64)          ARCH_TAG="x86_64" ;;
+    arm64 | aarch64) ARCH_TAG="arm64"  ;;
     *)
         echo "Unsupported architecture: $ARCH"
         exit 1
         ;;
 esac
 
+# macOS x86_64 binary is not released separately — arm64 runs via Rosetta
+if [ "$PLATFORM" = "darwin" ] && [ "$ARCH_TAG" = "x86_64" ]; then
+    echo "Note: no native Intel binary — downloading arm64 (runs via Rosetta on Intel Macs)"
+    ARCH_TAG="arm64"
+fi
+
 BINARY="cref-${PLATFORM}-${ARCH_TAG}"
 URL="https://github.com/${REPO}/releases/latest/download/${BINARY}"
 
+# Install runtime dependencies
 if [ "$PLATFORM" = "linux" ]; then
     if command -v apt-get > /dev/null 2>&1; then
-        sudo apt-get install -y libncurses6 2>/dev/null || true
+        sudo apt-get install -y libncurses6 libsodium23 2>/dev/null || \
+        sudo apt-get install -y libncurses5 libsodium18 2>/dev/null || true
     elif command -v dnf > /dev/null 2>&1; then
-        sudo dnf install -y ncurses 2>/dev/null || true
+        sudo dnf install -y ncurses libsodium 2>/dev/null || true
+    elif command -v pacman > /dev/null 2>&1; then
+        sudo pacman -S --noconfirm ncurses libsodium 2>/dev/null || true
     fi
 fi
 
