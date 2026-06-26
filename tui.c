@@ -58,6 +58,7 @@ typedef struct {
 #define CP_BAT_NUM   34   /* purple    → numbers               */
 #define CP_BAT_PARAM 35   /* orange    → functions/builtins    */
 #define CP_BAT_CMT   36   /* dark gray → comments              */
+#define CP_STATUS_INP 37  /* white on cyan — typed text in prompts */
 
 /* Layout */
 #define LEFT_W    32
@@ -287,6 +288,7 @@ void tui_init(void) {
         init_pair(CP_BAT_NUM,   COLOR_MAGENTA, -1);
         init_pair(CP_BAT_PARAM, COLOR_YELLOW,  -1);
         init_pair(CP_BAT_CMT,   COLOR_WHITE,   -1);
+        init_pair(CP_STATUS_INP, COLOR_WHITE,  COLOR_CYAN);
         term_init_colors();  /* pairs 40-103 for PTY terminal fg×bg */
     }
 }
@@ -832,7 +834,11 @@ static void draw_status(const App *app) {
             app->grep_hit_count);
         attroff(A_BOLD);
     } else if (app->mode == MODE_FILTER) {
-        mvprintw(STATUS_Y, 1, " Filter ext: %s", app->filter_input);
+        mvprintw(STATUS_Y, 1, " Filter ext: ");
+        attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        mvprintw(STATUS_Y, 14, "%s", app->filter_input);
+        attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
         attron(A_BLINK | A_BOLD);
         mvaddch(STATUS_Y, 14 + app->filter_input_len, '_');
         attroff(A_BLINK | A_BOLD);
@@ -840,7 +846,11 @@ static void draw_status(const App *app) {
         mvprintw(STATUS_Y, COLS - 27, "(Enter=apply  Esc=cancel)");
         attroff(A_BOLD);
     } else if (app->mode == MODE_GOTO) {
-        mvprintw(STATUS_Y, 1, " Go to: %s", app->goto_buf);
+        mvprintw(STATUS_Y, 1, " Go to: ");
+        attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        mvprintw(STATUS_Y, 9, "%s", app->goto_buf);
+        attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
         attron(A_BLINK | A_BOLD);
         mvaddch(STATUS_Y, 9 + app->goto_len, '_');
         attroff(A_BLINK | A_BOLD);
@@ -849,11 +859,15 @@ static void draw_status(const App *app) {
         attroff(A_BOLD);
     } else if (app->mode == MODE_NEW_FILE) {
         const char *sub = new_file_target_subdir(app);
-        if (sub[0])
-            mvprintw(STATUS_Y, 1, " New file in %s/: %s", sub, app->new_file_buf);
-        else
-            mvprintw(STATUS_Y, 1, " New file: %s", app->new_file_buf);
         int prefix = sub[0] ? 17 + (int)strlen(sub) : 12;
+        if (sub[0])
+            mvprintw(STATUS_Y, 1, " New file in %s/: ", sub);
+        else
+            mvprintw(STATUS_Y, 1, " New file: ");
+        attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        mvprintw(STATUS_Y, prefix, "%s", app->new_file_buf);
+        attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
         attron(A_BLINK | A_BOLD);
         mvaddch(STATUS_Y, prefix + app->new_file_len, '_');
         attroff(A_BLINK | A_BOLD);
@@ -869,11 +883,15 @@ static void draw_status(const App *app) {
         }
     } else if (app->mode == MODE_NEW_DIR) {
         const char *sub = new_file_target_subdir(app);
-        if (sub[0])
-            mvprintw(STATUS_Y, 1, " New dir in %s/: %s", sub, app->new_dir_buf);
-        else
-            mvprintw(STATUS_Y, 1, " New dir: %s", app->new_dir_buf);
         int prefix = sub[0] ? 16 + (int)strlen(sub) : 11;
+        if (sub[0])
+            mvprintw(STATUS_Y, 1, " New dir in %s/: ", sub);
+        else
+            mvprintw(STATUS_Y, 1, " New dir: ");
+        attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        mvprintw(STATUS_Y, prefix, "%s", app->new_dir_buf);
+        attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+        attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
         attron(A_BLINK | A_BOLD);
         mvaddch(STATUS_Y, prefix + app->new_dir_len, '_');
         attroff(A_BLINK | A_BOLD);
@@ -2554,7 +2572,9 @@ static void redraw(const App *app) {
             if (app->note_new_step == 0) {
                 mvprintw(mid, RIGHT_X + 2, "Yeni not basligi:");
                 attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+                attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
                 mvprintw(mid + 1, RIGHT_X + 2, "%s", app->note_new_title);
+                attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
                 mvprintw(mid + 2, RIGHT_X + 2, "[Enter] ileri  [Esc] iptal");
                 move(mid + 1, RIGHT_X + 2 + app->note_new_title_len);
             } else if (app->note_new_step == 1) {
@@ -2583,7 +2603,14 @@ static void redraw(const App *app) {
             /* Search bar at top of right panel, hits below */
             attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
             mvhline(PANEL_Y, RIGHT_X, ' ', RIGHT_W);
-            mvprintw(PANEL_Y, RIGHT_X + 1, " Search notes: %s_", app->note_sq);
+            mvprintw(PANEL_Y, RIGHT_X + 1, " Search notes: ");
+            attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+            mvprintw(PANEL_Y, RIGHT_X + 16, "%s", app->note_sq);
+            attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
+            attron(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            attron(A_BLINK | A_BOLD);
+            mvaddch(PANEL_Y, RIGHT_X + 16 + app->note_sq_len, '_');
+            attroff(A_BLINK | A_BOLD);
             attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
             int row = PANEL_Y + 1;
             for (int i = app->note_hit_offset;
@@ -2605,7 +2632,9 @@ static void redraw(const App *app) {
             mvhline(mid + 2, RIGHT_X + 1, ' ', RIGHT_W - 2);
             mvprintw(mid, RIGHT_X + 2, "Yeni klasor adi:");
             attroff(COLOR_PAIR(CP_STATUS) | A_BOLD);
+            attron(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
             mvprintw(mid + 1, RIGHT_X + 2, "%s", app->note_new_cat_buf);
+            attroff(COLOR_PAIR(CP_STATUS_INP) | A_BOLD);
             mvprintw(mid + 2, RIGHT_X + 2, "[Enter] olustur  [Esc] iptal");
             move(mid + 1, RIGHT_X + 2 + app->note_new_cat_len);
         }

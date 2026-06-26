@@ -248,7 +248,7 @@ FileMeta *scan_dir(const char *dir, int *count_out,
         while ((entry = readdir(d)) != NULL) {
             if (cancel && *cancel) break;
             const char *name = entry->d_name;
-            if (name[0] == '.') continue;
+            if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) continue;
 
             char child[META_PATH_LEN];
             snprintf(child, sizeof(child), "%s/%s", full, name);
