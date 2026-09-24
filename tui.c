@@ -88,6 +88,8 @@ typedef struct {
 #define KEY_SEL_PGDN      612   /* Shift+PgDn — extend selection */
 #define KEY_PASTE_START   613   /* \x1b[200~  — bracketed paste begin */
 #define KEY_PASTE_END     614   /* \x1b[201~  — bracketed paste end   */
+#define KEY_SEL_WUP       615   /* Shift+Option+Up   — extend selection up   */
+#define KEY_SEL_WDN       616   /* Shift+Option+Down — extend selection down */
 
 /* Grep view column layout */
 #define GREP_LBL_W   24
@@ -248,6 +250,10 @@ void tui_init(void) {
     define_key("\033[1;3B", KEY_LINE_MOVE_DN);   /* xterm Alt+Down */
     define_key("\033\033[A", KEY_LINE_MOVE_UP);  /* Terminal.app meta+Up */
     define_key("\033\033[B", KEY_LINE_MOVE_DN);  /* Terminal.app meta+Down */
+
+    /* Shift+Option+Up/Down — extend selection up/down (iTerm2 / xterm) */
+    define_key("\033[1;4A", KEY_SEL_WUP);
+    define_key("\033[1;4B", KEY_SEL_WDN);
 
     /* Shift+PgUp / Shift+PgDn — extend selection */
     define_key("\033[5;2~", KEY_SEL_PGUP);
@@ -1482,6 +1488,13 @@ static int save_note(App *app) {
     n->content = text;
 
     const char *pw = app->note_active_pw[0] ? app->note_active_pw : NULL;
+    if (n->has_pw && !pw) {
+        /* Should never happen: refuse to silently re-key a password
+           note with the device key alone (would lock the user out even
+           though has_pw stays set). Content is updated in memory but
+           not persisted until note_active_pw is valid again. */
+        return 0;
+    }
     vault_encrypt_note(v, app->open_note, pw);
     vault_save(v);
     app->content_dirty = 0;
@@ -1869,7 +1882,8 @@ static void syn_emit(int y, int x, const char *line, int cs, int ce,
     if (df >= dt) return;
     int n = dt - df;
     if (cp) attron(COLOR_PAIR(cp)|at); else if (at) attron(at);
-    mvaddnstr(y, x + (df - cs), line + df, n);
+    int dcol = utf8_display_col(line + cs, df - cs);
+    mvaddnstr(y, x + dcol, line + df, n);
     if (cp) attroff(COLOR_PAIR(cp)|at); else if (at) attroff(at);
 }
 
@@ -5402,6 +5416,24 @@ static void vault_lock_pw_notes(App *app) {
     }
 }
 
+/* If a different password-protected note is currently loaded in memory,
+   wipe its decrypted content before switching to note `ni`. This keeps
+   at most one password-protected note's plaintext (and note_active_pw)
+   live at a time, so a stale password from note A can never be reused
+   to silently re-key note B (or A re-saved after active_pw was cleared
+   for the wrong reason). */
+static void note_lock_before_switch(App *app, int ni) {
+    NoteVault *v = app->vault;
+    if (!v || app->open_note < 0 || app->open_note == ni) return;
+    if (app->open_note >= v->note_count) return;
+    Note *prev = &v->notes[app->open_note];
+    if (prev->has_pw && prev->content) {
+        sodium_memzero(prev->content, strlen(prev->content));
+        free(prev->content);
+        prev->content = NULL;
+    }
+}
+
 static void ensure_vault(App *app) {
     if (app->vault) return;
     app->vault = calloc(1, sizeof(NoteVault));
@@ -5465,6 +5497,9 @@ static void handle_notes(App *app, int key) {
         NViewItem item = app->notes_view[app->notes_sel];
         if (item.kind == NVIEW_CAT) break;
         int ni = item.idx;
+
+        note_lock_before_switch(app, ni);
+
         Note *n = &v->notes[ni];
 
         if (n->has_pw && !n->content) {
@@ -5477,7 +5512,13 @@ static void handle_notes(App *app, int key) {
             curs_set(1);
         } else {
             load_note_content(app, ni);
-            app->note_active_pw[0] = '\0';
+            /* Only clear the cached password when opening a note that
+               isn't password-protected. Re-selecting an already-open
+               (or already-decrypted this session) pw note must keep
+               note_active_pw intact — otherwise the next save silently
+               re-encrypts with the device key alone (has_pw stays 1,
+               but the real password no longer decrypts it). */
+            if (!n->has_pw) app->note_active_pw[0] = '\0';
             app->mode = MODE_NOTES;
         }
         break;
@@ -5646,6 +5687,7 @@ static void handle_note_pw(App *app, int key) {
 --------------------------------------------------------------- */
 /* Select + open a note in notes panel */
 static void note_select_and_open(App *app, int idx) {
+    note_lock_before_switch(app, idx);
     rebuild_notes_view(app);
     for (int i = 0; i < app->notes_view_count; i++) {
         if (app->notes_view[i].kind == NVIEW_NOTE &&
@@ -6334,6 +6376,16 @@ static void handle_edit(App *app, int key) {
         cursor_move_up(app);
         break;
     case KEY_SF:    /* ncurses name for shift-down */
+        if (!app->sel_active) sel_start(app);
+        cursor_move_down(app);
+        break;
+
+    /* Shift+Option+Up/Down — extend selection up/down (iTerm2 / xterm) */
+    case KEY_SEL_WUP:
+        if (!app->sel_active) sel_start(app);
+        cursor_move_up(app);
+        break;
+    case KEY_SEL_WDN:
         if (!app->sel_active) sel_start(app);
         cursor_move_down(app);
         break;
