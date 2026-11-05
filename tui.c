@@ -60,6 +60,133 @@ typedef struct {
 #define CP_BAT_CMT   36   /* dark gray → comments              */
 #define CP_STATUS_INP 37  /* white on cyan — typed text in prompts */
 
+/* ---------------------------------------------------------------
+   Theme palettes (Ctrl+P to pick). Each theme remaps the same set
+   of color pairs used above. Kept to the portable 8-color set (no
+   256-color / truecolor assumptions) so every theme still works
+   over a plain SSH session or a minimal terminfo.
+--------------------------------------------------------------- */
+#define THEME_COUNT    5
+#define THEME_NPAIRS   27
+
+typedef struct { short fg, bg; } ThemeColor;
+
+typedef struct {
+    const char *name;
+    ThemeColor  c[THEME_NPAIRS];
+} ThemeDef;
+
+/* Order must match the ThemeColor[] entries in THEMES below. */
+static const int THEMED_PAIRS[THEME_NPAIRS] = {
+    CP_HEADER, CP_STATUS, CP_SELECTED, CP_MD_HEAD, CP_CODE, CP_SUGGEST,
+    CP_DIVIDER, CP_TAG, CP_DIR,
+    CP_EXT_C, CP_EXT_H, CP_EXT_MD, CP_EXT_TXT, CP_EXT_PY, CP_EXT_JS,
+    CP_EXT_SH, CP_EXT_CFG, CP_EXT_WEB, CP_EXT_BIN,
+    CP_BAT_KW, CP_BAT_TYPE, CP_BAT_DEFN, CP_BAT_STR, CP_BAT_NUM,
+    CP_BAT_PARAM, CP_BAT_CMT, CP_STATUS_INP,
+};
+
+static const ThemeDef THEMES[THEME_COUNT] = {
+    { "Default", {
+        {COLOR_WHITE,COLOR_BLUE}, {COLOR_BLACK,COLOR_CYAN}, {COLOR_BLACK,COLOR_YELLOW},
+        {COLOR_CYAN,-1}, {COLOR_GREEN,COLOR_BLACK}, {COLOR_YELLOW,-1}, {COLOR_WHITE,-1},
+        {COLOR_MAGENTA,-1}, {COLOR_CYAN,-1},
+        {COLOR_BLUE,-1}, {COLOR_CYAN,-1}, {COLOR_GREEN,-1}, {-1,-1}, {COLOR_YELLOW,-1},
+        {COLOR_YELLOW,-1}, {COLOR_MAGENTA,-1}, {COLOR_CYAN,-1}, {COLOR_BLUE,-1}, {COLOR_RED,-1},
+        {COLOR_RED,-1}, {COLOR_CYAN,-1}, {COLOR_GREEN,-1}, {COLOR_YELLOW,-1}, {COLOR_MAGENTA,-1},
+        {COLOR_YELLOW,-1}, {COLOR_WHITE,-1}, {COLOR_WHITE,COLOR_CYAN},
+    }},
+    { "Dracula", {
+        {COLOR_WHITE,COLOR_MAGENTA}, {COLOR_BLACK,COLOR_MAGENTA}, {COLOR_BLACK,COLOR_CYAN},
+        {COLOR_MAGENTA,-1}, {COLOR_GREEN,COLOR_BLACK}, {COLOR_CYAN,-1}, {COLOR_MAGENTA,-1},
+        {COLOR_CYAN,-1}, {COLOR_MAGENTA,-1},
+        {COLOR_CYAN,-1}, {COLOR_MAGENTA,-1}, {COLOR_GREEN,-1}, {-1,-1}, {COLOR_YELLOW,-1},
+        {COLOR_YELLOW,-1}, {COLOR_GREEN,-1}, {COLOR_CYAN,-1}, {COLOR_MAGENTA,-1}, {COLOR_RED,-1},
+        {COLOR_MAGENTA,-1}, {COLOR_CYAN,-1}, {COLOR_GREEN,-1}, {COLOR_YELLOW,-1}, {COLOR_MAGENTA,-1},
+        {COLOR_GREEN,-1}, {COLOR_BLUE,-1}, {COLOR_WHITE,COLOR_MAGENTA},
+    }},
+    { "Nord", {
+        {COLOR_WHITE,COLOR_BLUE}, {COLOR_BLACK,COLOR_CYAN}, {COLOR_BLACK,COLOR_CYAN},
+        {COLOR_CYAN,-1}, {COLOR_CYAN,COLOR_BLACK}, {COLOR_WHITE,-1}, {COLOR_BLUE,-1},
+        {COLOR_CYAN,-1}, {COLOR_BLUE,-1},
+        {COLOR_BLUE,-1}, {COLOR_CYAN,-1}, {COLOR_WHITE,-1}, {-1,-1}, {COLOR_CYAN,-1},
+        {COLOR_CYAN,-1}, {COLOR_BLUE,-1}, {COLOR_CYAN,-1}, {COLOR_BLUE,-1}, {COLOR_RED,-1},
+        {COLOR_BLUE,-1}, {COLOR_CYAN,-1}, {COLOR_WHITE,-1}, {COLOR_CYAN,-1}, {COLOR_BLUE,-1},
+        {COLOR_WHITE,-1}, {COLOR_BLUE,-1}, {COLOR_WHITE,COLOR_BLUE},
+    }},
+    { "Gruvbox", {
+        {COLOR_BLACK,COLOR_YELLOW}, {COLOR_WHITE,COLOR_RED}, {COLOR_BLACK,COLOR_GREEN},
+        {COLOR_YELLOW,-1}, {COLOR_GREEN,COLOR_BLACK}, {COLOR_YELLOW,-1}, {COLOR_YELLOW,-1},
+        {COLOR_RED,-1}, {COLOR_YELLOW,-1},
+        {COLOR_RED,-1}, {COLOR_YELLOW,-1}, {COLOR_GREEN,-1}, {-1,-1}, {COLOR_YELLOW,-1},
+        {COLOR_YELLOW,-1}, {COLOR_RED,-1}, {COLOR_GREEN,-1}, {COLOR_RED,-1}, {COLOR_RED,-1},
+        {COLOR_RED,-1}, {COLOR_YELLOW,-1}, {COLOR_GREEN,-1}, {COLOR_GREEN,-1}, {COLOR_RED,-1},
+        {COLOR_YELLOW,-1}, {COLOR_WHITE,-1}, {COLOR_BLACK,COLOR_YELLOW},
+    }},
+    { "Solarized", {
+        {COLOR_BLACK,COLOR_CYAN}, {COLOR_BLACK,COLOR_YELLOW}, {COLOR_BLACK,COLOR_CYAN},
+        {COLOR_YELLOW,-1}, {COLOR_CYAN,COLOR_BLACK}, {COLOR_YELLOW,-1}, {COLOR_CYAN,-1},
+        {COLOR_YELLOW,-1}, {COLOR_CYAN,-1},
+        {COLOR_CYAN,-1}, {COLOR_YELLOW,-1}, {COLOR_GREEN,-1}, {-1,-1}, {COLOR_YELLOW,-1},
+        {COLOR_YELLOW,-1}, {COLOR_GREEN,-1}, {COLOR_CYAN,-1}, {COLOR_CYAN,-1}, {COLOR_RED,-1},
+        {COLOR_GREEN,-1}, {COLOR_YELLOW,-1}, {COLOR_CYAN,-1}, {COLOR_CYAN,-1}, {COLOR_YELLOW,-1},
+        {COLOR_GREEN,-1}, {COLOR_CYAN,-1}, {COLOR_BLACK,COLOR_CYAN},
+    }},
+};
+
+static void apply_theme(int idx) {
+    if (!has_colors()) return;
+    if (idx < 0 || idx >= THEME_COUNT) idx = 0;
+    const ThemeDef *t = &THEMES[idx];
+    for (int i = 0; i < THEME_NPAIRS; i++)
+        init_pair(THEMED_PAIRS[i], t->c[i].fg, t->c[i].bg);
+}
+
+static void theme_path(char *out, size_t len) {
+    const char *home = getenv("HOME");
+    snprintf(out, len, "%s/.config/cref/theme", home ? home : "/tmp");
+}
+
+static void theme_mkdir_p(const char *path) {
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') { *p = '\0'; mkdir(tmp, 0700); *p = '/'; }
+    }
+    mkdir(tmp, 0700);
+}
+
+static int load_theme_index(void) {
+    char path[512];
+    theme_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char name[64] = {0};
+    if (fgets(name, sizeof(name), f))
+        name[strcspn(name, "\r\n")] = '\0';
+    fclose(f);
+    for (int i = 0; i < THEME_COUNT; i++)
+        if (strcmp(name, THEMES[i].name) == 0) return i;
+    return 0;
+}
+
+static void save_theme_index(int idx) {
+    char path[512];
+    theme_path(path, sizeof(path));
+
+    char dir[512];
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *sl = strrchr(dir, '/');
+    if (sl) { *sl = '\0'; theme_mkdir_p(dir); }
+
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%s\n", THEMES[idx].name);
+    fclose(f);
+}
+
 /* Layout */
 #define LEFT_W    32
 #define HEADER_Y  0
@@ -186,7 +313,7 @@ static int ext_color_pair(const char *ext) {
 /* ---------------------------------------------------------------
    Init / cleanup
 --------------------------------------------------------------- */
-void tui_init(void) {
+void tui_init(App *app) {
     initscr();
     raw();
     noecho();
@@ -268,33 +395,8 @@ void tui_init(void) {
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(CP_HEADER,   COLOR_WHITE,   COLOR_BLUE);
-        init_pair(CP_STATUS,   COLOR_BLACK,   COLOR_CYAN);
-        init_pair(CP_SELECTED, COLOR_BLACK,   COLOR_YELLOW);
-        init_pair(CP_MD_HEAD,  COLOR_CYAN,    -1);
-        init_pair(CP_CODE,     COLOR_GREEN,   COLOR_BLACK);
-        init_pair(CP_SUGGEST,  COLOR_YELLOW,  -1);
-        init_pair(CP_DIVIDER,  COLOR_WHITE,   -1);
-        init_pair(CP_TAG,      COLOR_MAGENTA, -1);
-        init_pair(CP_DIR,      COLOR_CYAN,    -1);
-        init_pair(CP_EXT_C,    COLOR_BLUE,    -1);
-        init_pair(CP_EXT_H,    COLOR_CYAN,    -1);
-        init_pair(CP_EXT_MD,   COLOR_GREEN,   -1);
-        init_pair(CP_EXT_TXT,  -1,            -1);
-        init_pair(CP_EXT_PY,   COLOR_YELLOW,  -1);
-        init_pair(CP_EXT_JS,   COLOR_YELLOW,  -1);
-        init_pair(CP_EXT_SH,   COLOR_MAGENTA, -1);
-        init_pair(CP_EXT_CFG,  COLOR_CYAN,    -1);
-        init_pair(CP_EXT_WEB,  COLOR_BLUE,    -1);
-        init_pair(CP_EXT_BIN,  COLOR_RED,     -1);
-        init_pair(CP_BAT_KW,    COLOR_RED,     -1);
-        init_pair(CP_BAT_TYPE,  COLOR_CYAN,    -1);
-        init_pair(CP_BAT_DEFN,  COLOR_GREEN,   -1);
-        init_pair(CP_BAT_STR,   COLOR_YELLOW,  -1);
-        init_pair(CP_BAT_NUM,   COLOR_MAGENTA, -1);
-        init_pair(CP_BAT_PARAM, COLOR_YELLOW,  -1);
-        init_pair(CP_BAT_CMT,   COLOR_WHITE,   -1);
-        init_pair(CP_STATUS_INP, COLOR_WHITE,  COLOR_CYAN);
+        app->theme_active = load_theme_index();
+        apply_theme(app->theme_active);
         term_init_colors();  /* pairs 40-103 for PTY terminal fg×bg */
     }
 }
@@ -2540,6 +2642,7 @@ static void draw_compile_out(const App *app) {
    Full redraw
 --------------------------------------------------------------- */
 static void draw_help(const App *app);      /* forward declaration */
+static void draw_theme_picker(const App *app);
 static void draw_term_panel(const App *app);
 static void toggle_term(App *app);
 
@@ -2547,6 +2650,10 @@ static void redraw(const App *app) {
     erase();
     if (app->mode == MODE_HELP) {
         draw_help(app);
+        return;
+    }
+    if (app->mode == MODE_THEME) {
+        draw_theme_picker(app);
         return;
     }
     draw_header(app);
@@ -5198,6 +5305,12 @@ static void handle_list_tree(App *app, int key) {
         app->mode = MODE_HELP;
         break;
 
+    case 16: /* Ctrl+P — theme picker */
+        app->theme_prev_mode = MODE_LIST;
+        app->theme_sel = app->theme_active;
+        app->mode = MODE_THEME;
+        break;
+
     case 15: /* Ctrl+O — toggle command panel */
         toggle_term(app);
         break;
@@ -5356,6 +5469,12 @@ static void handle_list_filtered(App *app, int key) {
         app->help_prev_mode = MODE_LIST;
         app->help_offset = 0;
         app->mode = MODE_HELP;
+        break;
+
+    case 16: /* Ctrl+P — theme picker */
+        app->theme_prev_mode = MODE_LIST;
+        app->theme_sel = app->theme_active;
+        app->mode = MODE_THEME;
         break;
 
     case 'q':
@@ -5620,6 +5739,12 @@ static void handle_notes(App *app, int key) {
 
     case 'q': case 'Q':
         app->quit = 1;
+        break;
+
+    case 16: /* Ctrl+P — theme picker */
+        app->theme_prev_mode = MODE_NOTES;
+        app->theme_sel = app->theme_active;
+        app->mode = MODE_THEME;
         break;
 
     case '?':
@@ -6202,6 +6327,12 @@ static void handle_content(App *app, int key) {
         toggle_term(app);
         break;
 
+    case 16: /* Ctrl+P — theme picker */
+        app->theme_prev_mode = MODE_CONTENT;
+        app->theme_sel = app->theme_active;
+        app->mode = MODE_THEME;
+        break;
+
     case '?':
         app->help_prev_mode = MODE_CONTENT;
         app->help_offset = 0;
@@ -6296,6 +6427,13 @@ static void handle_edit(App *app, int key) {
         app->help_prev_mode = MODE_EDIT;
         app->help_offset = 0;
         app->mode = MODE_HELP;
+        curs_set(0);
+        break;
+
+    case 16: /* Ctrl+P — theme picker */
+        app->theme_prev_mode = MODE_EDIT;
+        app->theme_sel = app->theme_active;
+        app->mode = MODE_THEME;
         curs_set(0);
         break;
 
@@ -6859,6 +6997,7 @@ static const char *help_lines[] = {
     "  Ctrl+L         toggle CWD ↔ C library",
     "  Ctrl+B         build (make if Makefile, else gcc on open .c)",
     "  Ctrl+O         toggle embedded terminal panel",
+    "  Ctrl+P         theme picker (Default/Dracula/Nord/Gruvbox/Solarized)",
     "  e              enter editor",
     "",
     "  Notes panel (Ctrl+Y to open):",
@@ -6983,6 +7122,64 @@ static void handle_help(App *app, int key) {
 }
 
 /* ---------------------------------------------------------------
+   Theme picker (MODE_THEME)
+--------------------------------------------------------------- */
+static void draw_theme_picker(const App *app) {
+    int box_w = 30;
+    for (int i = 0; i < THEME_COUNT; i++) {
+        int nlen = (int)strlen(THEMES[i].name);
+        if (nlen + 4 > box_w) box_w = nlen + 4;
+    }
+    int box_h = THEME_COUNT + 4;
+    int y0 = (LINES - box_h) / 2;
+    int x0 = (COLS  - box_w) / 2;
+    if (y0 < 0) y0 = 0;
+    if (x0 < 0) x0 = 0;
+
+    attron(A_BOLD | A_UNDERLINE);
+    mvprintw(y0, x0, "%-*s", box_w, " Theme");
+    attroff(A_BOLD | A_UNDERLINE);
+
+    for (int i = 0; i < THEME_COUNT; i++) {
+        int row = y0 + 1 + i;
+        int is_sel = (i == app->theme_sel);
+        if (is_sel) attron(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+        mvprintw(row, x0, " %-*s", box_w - 1, THEMES[i].name);
+        if (is_sel) attroff(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+    }
+
+    attron(A_DIM);
+    mvprintw(y0 + box_h - 2, x0, "%-*s", box_w, " ↑↓ select");
+    mvprintw(y0 + box_h - 1, x0, "%-*s", box_w, " Enter apply  Esc cancel");
+    attroff(A_DIM);
+}
+
+static void handle_theme(App *app, int key) {
+    switch (key) {
+    case KEY_UP: case 'k':
+        if (app->theme_sel > 0) app->theme_sel--;
+        apply_theme(app->theme_sel);
+        return;
+    case KEY_DOWN: case 'j':
+        if (app->theme_sel < THEME_COUNT - 1) app->theme_sel++;
+        apply_theme(app->theme_sel);
+        return;
+    case '\n': case '\r': case KEY_ENTER:
+        app->theme_active = app->theme_sel;
+        save_theme_index(app->theme_active);
+        break;
+    case 27: case 'q': /* Esc / q — cancel, revert live preview */
+        apply_theme(app->theme_active);
+        break;
+    default:
+        return;
+    }
+    app->mode = app->theme_prev_mode;
+    if (app->mode == MODE_EDIT)
+        curs_set(1);
+}
+
+/* ---------------------------------------------------------------
    Main loop
 --------------------------------------------------------------- */
 void tui_run(App *app) {
@@ -7085,6 +7282,7 @@ void tui_run(App *app) {
         case MODE_CONFIRM_DEL:  handle_confirm_del(app, key);  break;
         case MODE_COMPILE_OUT:  handle_compile_out(app, key);  break;
         case MODE_HELP:         handle_help(app, key);         break;
+        case MODE_THEME:        handle_theme(app, key);        break;
         case MODE_TERM:         handle_terminal(app, key);     break;
         case MODE_NOTES:        handle_notes(app, key);        break;
         case MODE_NOTE_PW:      handle_note_pw(app, key);      break;
