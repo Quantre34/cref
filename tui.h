@@ -51,6 +51,7 @@ typedef struct {
     char **lines;
     int    line_count;
     int    capacity;
+    int    crlf;        /* 1 if the file on disk uses CRLF line endings */
 } Content;
 
 typedef enum { NODE_DIR, NODE_FILE } NodeKind;
