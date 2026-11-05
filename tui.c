@@ -2647,13 +2647,24 @@ static void draw_term_panel(const App *app);
 static void toggle_term(App *app);
 
 static void redraw(const App *app) {
+    if (app->mode == MODE_THEME) {
+        /* Render the screen as it looked in whatever mode opened the
+           picker, then paint the picker on top — apply_theme() already
+           re-inits the color pairs live on ↑/↓, so this is what actually
+           makes that a visible preview instead of a blank screen with a
+           highlight bar on it. App isn't truly const; this flips mode
+           for one recursive render and restores it immediately after. */
+        App *mut = (App *)app;
+        int real_mode = mut->mode;
+        mut->mode = app->theme_prev_mode;
+        redraw(app);
+        mut->mode = real_mode;
+        draw_theme_picker(app);
+        return;
+    }
     erase();
     if (app->mode == MODE_HELP) {
         draw_help(app);
-        return;
-    }
-    if (app->mode == MODE_THEME) {
-        draw_theme_picker(app);
         return;
     }
     draw_header(app);
@@ -7136,22 +7147,30 @@ static void draw_theme_picker(const App *app) {
     if (y0 < 0) y0 = 0;
     if (x0 < 0) x0 = 0;
 
-    attron(A_BOLD | A_UNDERLINE);
+    /* Solid backdrop so the popup reads as a menu over whatever is
+       now visible behind it, rather than floating default-colored
+       text over the re-themed screen. */
+    attron(COLOR_PAIR(CP_STATUS));
+    for (int r = 0; r < box_h; r++)
+        mvhline(y0 + r, x0, ' ', box_w);
+    attroff(COLOR_PAIR(CP_STATUS));
+
+    attron(COLOR_PAIR(CP_STATUS) | A_BOLD | A_UNDERLINE);
     mvprintw(y0, x0, "%-*s", box_w, " Theme");
-    attroff(A_BOLD | A_UNDERLINE);
+    attroff(COLOR_PAIR(CP_STATUS) | A_BOLD | A_UNDERLINE);
 
     for (int i = 0; i < THEME_COUNT; i++) {
         int row = y0 + 1 + i;
         int is_sel = (i == app->theme_sel);
-        if (is_sel) attron(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+        attron(COLOR_PAIR(is_sel ? CP_SELECTED : CP_STATUS) | A_BOLD);
         mvprintw(row, x0, " %-*s", box_w - 1, THEMES[i].name);
-        if (is_sel) attroff(COLOR_PAIR(CP_SELECTED) | A_BOLD);
+        attroff(COLOR_PAIR(is_sel ? CP_SELECTED : CP_STATUS) | A_BOLD);
     }
 
-    attron(A_DIM);
+    attron(COLOR_PAIR(CP_STATUS) | A_DIM);
     mvprintw(y0 + box_h - 2, x0, "%-*s", box_w, " ↑↓ select");
     mvprintw(y0 + box_h - 1, x0, "%-*s", box_w, " Enter apply  Esc cancel");
-    attroff(A_DIM);
+    attroff(COLOR_PAIR(CP_STATUS) | A_DIM);
 }
 
 static void handle_theme(App *app, int key) {
