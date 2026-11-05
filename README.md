@@ -88,6 +88,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `Ctrl+R` | Reload directory |
 | `Ctrl+B` | Build (`make` or `gcc` all `.c` files) |
 | `Ctrl+O` | Open embedded terminal |
+| `Ctrl+P` | Theme picker (Default/Dracula/Nord/Gruvbox/Solarized) |
 | `?` | Help overlay |
 | `q` | Quit |
 
@@ -131,6 +132,7 @@ cref -d ~/src --filetype c,h  # browse only .c and .h files
 | `Ctrl+D` | Duplicate line |
 | `Ctrl+R` | Reload file from disk |
 | `Shift+Alt+←/→` | Word selection |
+| `Ctrl+P` | Theme picker |
 
 ### Grep Mode
 | Key | Action |
