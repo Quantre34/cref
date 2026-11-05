@@ -56,6 +56,25 @@ Or install for the current user only:
 make install PREFIX=~/.local
 ```
 
+### Uninstalling / updating to a new version
+
+If you installed via the quick-install script:
+
+```bash
+rm "${CREF_INSTALL_DIR:-$HOME/.local/bin}/cref"
+```
+
+If you installed from source with `make install`, use the matching `PREFIX`:
+
+```bash
+make uninstall PREFIX=/usr/local   # or PREFIX=~/.local, whichever you used
+```
+
+**Still running the old version after reinstalling?** Two common causes:
+
+- **You have more than one `cref` on your `PATH`.** The quick-install script and `make install` use different locations (`~/.local/bin` vs `/usr/local/bin`), so if you've ever used both, both binaries still exist. Run `which -a cref` to see every copy, and remove the one(s) you don't want with the commands above.
+- **Your shell cached the old path.** bash/zsh remember the resolved path of a command for the lifetime of the shell session, so a terminal that already ran `cref` before you reinstalled it will keep using the old binary even if a newer one now comes first on `PATH`. Open a new terminal, or run `hash -r` (bash) / `rehash` (zsh) in the existing one.
+
 ## Usage
 
 ```bash
