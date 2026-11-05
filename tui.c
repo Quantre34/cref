@@ -2239,6 +2239,7 @@ static void draw_content(const App *app) {
             "  • Ctrl+O            : toggle terminal panel",
             "  • Ctrl+L            : toggle CWD ↔ library",
             "  • Ctrl+T            : filter by file type",
+            "  • Ctrl+P            : theme picker",
             "",
             "  Editor  (press e to enter, Esc to exit):",
             "  • Ctrl+S            : save",
