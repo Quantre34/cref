@@ -33,6 +33,7 @@ typedef enum {
     MODE_CONFIRM_DEL, /* Ctrl+D: delete confirmation prompt */
     MODE_COMPILE_OUT, /* Ctrl+B: build output viewer */
     MODE_HELP,        /* ?: shortcuts overlay */
+    MODE_THEME,       /* Ctrl+P: theme picker */
     MODE_TERM,        /* Ctrl+O: embedded PTY terminal panel */
     MODE_NOTES,       /* Ctrl+Y: notes tree panel active */
     MODE_NOTE_PW,     /* password prompt for locked note */
@@ -204,6 +205,11 @@ typedef struct {
     int     help_prev_mode;
     int     help_offset;
 
+    /* Theme picker (MODE_THEME / Ctrl+P) */
+    int     theme_prev_mode;
+    int     theme_active;   /* currently applied theme index */
+    int     theme_sel;      /* highlighted row while picker is open */
+
     /* PTY terminal panel (MODE_TERM / Ctrl+O) */
     Term   *term;
     int     term_panel_open;
@@ -295,7 +301,7 @@ typedef struct {
     int  pasting;   /* 1 while bracketed paste is in progress */
 } App;
 
-void tui_init(void);
+void tui_init(App *app);
 void tui_cleanup(void);
 void tui_run(App *app);
 void content_free(Content *c);

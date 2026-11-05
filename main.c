@@ -266,7 +266,7 @@ int main(int argc, char *argv[]) {
         app->query_len = (int)strlen(app->query);
     }
 
-    tui_init();
+    tui_init(app);
     tui_run(app);
     tui_cleanup();
 
