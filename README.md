@@ -56,7 +56,24 @@ Or install for the current user only:
 make install PREFIX=~/.local
 ```
 
-### Uninstalling / updating to a new version
+### Updating to a new version
+
+Re-run whichever install method you used originally — it overwrites the existing binary in place:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Quantre34/cref/main/install.sh | sh
+```
+
+```bash
+# or, from a source checkout
+git pull
+make
+sudo make install      # same PREFIX you used before
+```
+
+Then **open a new terminal** (or run `hash -r` in bash / `rehash` in zsh in the current one) before checking — see "still running the old version" below if `cref` still looks unchanged after that.
+
+### Uninstalling
 
 If you installed via the quick-install script:
 
@@ -70,10 +87,19 @@ If you installed from source with `make install`, use the matching `PREFIX`:
 make uninstall PREFIX=/usr/local   # or PREFIX=~/.local, whichever you used
 ```
 
-**Still running the old version after reinstalling?** Two common causes:
+**Still running the old version after reinstalling?** Run `which -a cref` first — it lists every copy on your `PATH`, in the order your shell would pick them. Two common causes:
 
-- **You have more than one `cref` on your `PATH`.** The quick-install script and `make install` use different locations (`~/.local/bin` vs `/usr/local/bin`), so if you've ever used both, both binaries still exist. Run `which -a cref` to see every copy, and remove the one(s) you don't want with the commands above.
-- **Your shell cached the old path.** bash/zsh remember the resolved path of a command for the lifetime of the shell session, so a terminal that already ran `cref` before you reinstalled it will keep using the old binary even if a newer one now comes first on `PATH`. Open a new terminal, or run `hash -r` (bash) / `rehash` (zsh) in the existing one.
+- **You have more than one `cref` on your `PATH`.** The quick-install script and `make install` use different locations (`~/.local/bin` vs `/usr/local/bin` by default), so if you've ever used both, both binaries still exist — and whichever directory comes first in `PATH` wins, not necessarily the one you installed most recently. Remove the one you don't want by its exact path from the `which -a` output, e.g.:
+
+  ```bash
+  sudo rm /usr/local/bin/cref        # remove the make-install copy
+  # or
+  rm ~/.local/bin/cref               # remove the quick-install copy
+  ```
+
+  Don't automate this as `sudo rm $(which cref)` — plain `which` returns only the *first* match, so if that happens to be the correct, newer binary (common once `~/.local/bin` is early on `PATH`), the command deletes the one you meant to keep instead of the stale one. Check `which -a cref`'s output yourself and remove the specific path that's actually stale.
+
+- **Your shell cached the old path.** bash/zsh remember the resolved path of a command for the lifetime of the shell session, so a terminal that already ran `cref` before you reinstalled it will keep using the old binary even if a newer one now comes first on `PATH`. Run `hash -r` (bash) or `rehash` (zsh) after removing/reinstalling, or just open a new terminal.
 
 ## Usage
 
