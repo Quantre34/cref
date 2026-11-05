@@ -311,6 +311,7 @@ void content_free(Content *c) {
     c->lines      = NULL;
     c->line_count = 0;
     c->capacity   = 0;
+    c->crlf       = 0;
 }
 
 static void content_append_line_raw(Content *c, const char *text) {
@@ -2753,12 +2754,29 @@ static void update_search(App *app) {
     app->list_offset = 0;
 }
 
+/* Peek at a file's own line endings, independent of which rendering path
+   (bat or the built-in tokenizer) ends up displaying it — both strip \r\n
+   while parsing, so this must run against the raw file to catch CRLF. */
+static int detect_crlf(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[1024];
+    int crlf = 0;
+    if (fgets(line, sizeof(line), f)) {
+        size_t eol = strcspn(line, "\r\n");
+        crlf = (line[eol] == '\r' && line[eol + 1] == '\n');
+    }
+    fclose(f);
+    return crlf;
+}
+
 /* ---------------------------------------------------------------
    Load file content into buffer
 --------------------------------------------------------------- */
 static void load_content(App *app, int file_idx) {
     content_free(&app->content);
     bat_free(app);
+    app->content.crlf = detect_crlf(app->files[file_idx].path);
 
     if (app->files[file_idx].unreadable) {
         int cap = 2;
@@ -3741,8 +3759,9 @@ static int save_file(App *app) {
     const char *path = app->files[app->open_file].path;
     FILE *f = fopen(path, "w");
     if (!f) return 0;
+    const char *eol = app->content.crlf ? "\r\n" : "\n";
     for (int i = 0; i < app->content.line_count; i++)
-        fprintf(f, "%s\n", app->content.lines[i]);
+        fprintf(f, "%s%s", app->content.lines[i], eol);
     fclose(f);
     app->content_dirty = 0;
     app->files[app->open_file].line_count = app->content.line_count;
@@ -6204,15 +6223,6 @@ static void handle_content(App *app, int key) {
     }
 }
 
-static int is_makefile(const App *app) {
-    if (app->open_file < 0) return 0;
-    const char *n = app->files[app->open_file].filename;
-    int l = (int)strlen(n);
-    return strcmp(n, "Makefile") == 0 || strcmp(n, "makefile") == 0 ||
-           strcmp(n, "GNUmakefile") == 0 ||
-           (l > 3 && strcmp(n + l - 3, ".mk") == 0);
-}
-
 static void handle_edit(App *app, int key) {
     if (app->save_flash > 0) app->save_flash--;
     app->last_key = key;
@@ -6524,10 +6534,7 @@ static void handle_edit(App *app, int key) {
 
     case '\t':
         if (app->sel_active) { edit_delete_sel(app); sel_clear(app); }
-        if (is_makefile(app))
-            edit_insert_char(app, '\t');
-        else
-            for (int i = 0; i < 4; i++) edit_insert_char(app, ' ');
+        edit_insert_char(app, '\t');
         break;
 
     case KEY_MOUSE: {
