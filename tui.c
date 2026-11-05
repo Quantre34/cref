@@ -2764,7 +2764,12 @@ static int detect_crlf(const char *path) {
     int crlf = 0;
     if (fgets(line, sizeof(line), f)) {
         size_t eol = strcspn(line, "\r\n");
-        crlf = (line[eol] == '\r' && line[eol + 1] == '\n');
+        if (line[eol] == '\r') {
+            /* '\r' landing exactly at the fgets buffer edge leaves '\n'
+               (if any) still unread in the stream — peek one more byte. */
+            crlf = (line[eol + 1] == '\n') ||
+                   (line[eol + 1] == '\0' && fgetc(f) == '\n');
+        }
     }
     fclose(f);
     return crlf;
