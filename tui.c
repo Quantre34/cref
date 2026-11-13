@@ -2457,8 +2457,15 @@ static void draw_content(const App *app) {
                     int cs = chunk * mw;
                     int ce = cs + mw;
                     if (m_end <= cs || m >= ce) continue;
-                    int hl_from = m > cs ? m - cs : 0;
-                    int hl_to   = (m_end < ce ? m_end : ce) - cs;
+                    /* Map raw char offsets to display columns so tabs in the
+                       line don't throw off where the highlight lands versus
+                       the (tab-expanded) text actually drawn. */
+                    int chunk_dcol = utf8_display_col(fl, cs);
+                    int hl_from = m > cs
+                        ? utf8_display_col(fl, m) - chunk_dcol : 0;
+                    int hl_to   = m_end < ce
+                        ? utf8_display_col(fl, m_end) - chunk_dcol : mw;
+                    if (hl_to > mw) hl_to = mw;
                     int sw      = hl_to - hl_from;
                     if (sw > 0 && hl_from < mw) {
                         /* if this is the cursor's current match, use stronger
@@ -2500,8 +2507,15 @@ static void draw_content(const App *app) {
                 int sel_from   = (ssi == r0) ? c0 : 0;
                 int sel_to     = (ssi == r1) ? c1 : sllen;
                 if (sel_from >= ce || sel_to <= cs) continue;
-                int hl_from = sel_from > cs ? sel_from - cs : 0;
-                int hl_to   = (sel_to < ce ? sel_to : ce) - cs;
+                /* Map raw char offsets to display columns so tabs in the
+                   line don't throw off where the highlight lands versus
+                   the (tab-expanded) text actually drawn. */
+                int chunk_dcol = utf8_display_col(sl, cs);
+                int hl_from = sel_from > cs
+                    ? utf8_display_col(sl, sel_from) - chunk_dcol : 0;
+                int hl_to   = sel_to < ce
+                    ? utf8_display_col(sl, sel_to) - chunk_dcol : mw;
+                if (hl_to > mw) hl_to = mw;
                 int sw      = hl_to - hl_from;
                 if (sw > 0 && hl_from < mw)
                     mvchgat(base_row + sdi, cont_col + hl_from,
